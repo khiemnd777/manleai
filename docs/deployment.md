@@ -439,6 +439,52 @@ Platform Admin count that passes `app_platform_admin_capability` and
 expected V76 distinction between direct Admin authority and temporary
 Platform Ops support authorization.
 
+### Read-only production Platform Admin RBAC matrix audit
+
+Use `.github/workflows/production-platform-admin-rbac-audit.yml` when an
+approved operator needs direct production database evidence for the complete
+current Platform Admin capability matrix. The protected manual workflow
+requires the exact `AUDIT_PRODUCTION_PLATFORM_ADMIN_RBAC` confirmation, a
+bounded non-sensitive approval reference, one UUID tenant ID for salon-scoped
+decisions, and the normal production SSH secrets. It temporarily uploads
+`deploy/production-platform-admin-rbac-audit.sh`, selects exactly one healthy
+ManleAI PostgreSQL container, and executes a fixed query with PostgreSQL
+`default_transaction_read_only=on`, an explicit read-only transaction, and
+bounded statement and lock timeouts.
+
+The fixed output reports the number of active Platform Admin accounts, the
+number of distinct capabilities assigned to the `platform_admin` role, any
+unexpected assigned capabilities, and the active-Admin count that passes each
+of the 20 registered RBAC capabilities. It also evaluates the four documented
+PII decisions against the exact tenant: customers through `business.read`,
+calls through `calls.read`, appointments through `business.read`, and
+notifications through `operations.read`. These PII rows are authorization
+booleans only; they do not read or output any PII-bearing business row.
+
+The audit never outputs account IDs, email addresses, names, phone numbers,
+tenant business data, provider data, password material, SSH material, or other
+secrets. It does not grant, revoke, migrate, normalize, or otherwise modify
+accounts, role assignments, capabilities, PII grants, tenants, schema,
+containers, releases, or domain routing.
+
+Run it from an authenticated GitHub CLI after the protected environment is
+ready:
+
+```bash
+gh workflow run production-platform-admin-rbac-audit.yml \
+  --ref main \
+  -f confirmation=AUDIT_PRODUCTION_PLATFORM_ADMIN_RBAC \
+  -f approval_reference='<approved-audit-reference>' \
+  -f tenant_id='<production-tenant-uuid>'
+```
+
+Interpret every capability or PII value as the count of active Platform Admin
+accounts that passed that exact database decision. Compare it with
+`active_platform_admin_accounts`; a lower value proves production RBAC drift
+for that decision. `platform_admin_role_unexpected_capabilities` reports
+capability names outside the current 20-capability application contract without
+printing those names.
+
 ### V78-V80 system-tenant context rollout
 
 `V78__system_tenant_context_expand.sql` is intentionally the expand release of
