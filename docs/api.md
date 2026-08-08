@@ -1283,6 +1283,16 @@ authorized Calls renderer and require the same request-linked Calls PII grant.
 They do not grant `services.read`, expose the Services management endpoints, or
 permit any service/category/profile mutation.
 
+The normalized detail route
+`GET /api/v2/platform/tenants/:tenant_id/calls/:session_id` returns the session
+under `data`, including optional `detail_warnings`. Valid legacy JSON values
+whose top-level shape no longer matches optional transcript metadata or party
+guest details are omitted from that projection and reported through a safe
+warning; persisted source data is not rewritten. A real child-read failure is
+reported without raw database text as `CONVERSATION_TRANSCRIPT_FAILED`,
+`CONVERSATION_HANDOFF_FAILED`, `CONVERSATION_PARTY_REQUEST_FAILED`, or
+`CONVERSATION_SCHEDULING_EVIDENCE_FAILED`.
+
 ## SaaS Shared Business APIs
 
 V65 exposes one Business contract through two route-owned surfaces. Tenant
@@ -3565,6 +3575,13 @@ Creates a simulator session and writes the initial AI transcript message. The in
 `GET /api/salons/:id/conversation-sessions/:session_id`
 
 Returns one conversation session with transcript messages and the latest handoff request when present. Booking state includes `requested_date` when the customer has provided a day but not a specific time, and `requested_start_time` only after a concrete start time or offered slot is selected. A successfully persisted owner-manual request sets `scheduling_request_id` and `outcome=owner_review_pending` while leaving `appointment_id` and `booking_attempt_id` empty. `dialog_state` is a versioned operational state object containing phase, pending typed clarification, bounded mutation history, no-progress count, `draft_revision`, `reviewed_revision`, `authorized_revision`, and optional `consultation` and `guidance` state. Consultation state includes controlled caller needs such as desired finish, candidate and recommended service IDs, selected service ID, last asked field, profile revisions, recommendation reasons, bounded no-progress count, resume phase, and exit reason. Guidance state includes `stage`, dynamically derived `offered_actions`, `awaiting_action_choice`, separate `no_progress_count` and `provider_failure_count`, `progress_fingerprint`, and `last_provider_outcome`. Existing legacy guidance prompt/counter fields are normalized into this version 5 nested object on read without a database migration. `awaiting_action_choice` enables only the bounded choices from the immediately preceding provider-failure prompt; it is not a general caller-intent classifier and is cleared on progress or terminal handoff. A bounded semantic-provider outage uses handoff reason `guidance_provider_unavailable`; caller ambiguity continues to use `service_clarification_unresolved`. Transcript messages may include PII-reduced turn-understanding diagnostics, validated acts/questions, revision transitions, slot state, event keys, guardrail outcomes, answer sources, consultation or guidance audit metadata, and next required field.
+
+Optional detail children use a compatibility projection. Valid legacy
+transcript `metadata` that is not an object and valid legacy party guest data
+that is not the current array shape are omitted and surfaced in
+`detail_warnings`; the raw stored record is not changed. Database or scan
+failures remain fatal and return the sanitized section-specific error codes
+listed for the normalized Platform route above.
 
 Both the list and detail responses include `scheduling_result_evidence`, an
 owner-scoped backend projection whose default is `complete=false`. Clients must

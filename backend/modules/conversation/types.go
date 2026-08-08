@@ -902,6 +902,7 @@ type Session struct {
 	Transcript               []TranscriptMessage             `json:"transcript,omitempty"`
 	Handoff                  *HandoffRequest                 `json:"handoff,omitempty"`
 	PartyRequest             *PartyBookingRequest            `json:"party_request,omitempty"`
+	DetailWarnings           []ConversationDetailWarning     `json:"detail_warnings,omitempty"`
 	// ReplayAIMessage is an internal response override for a deduplicated
 	// provider event. The persisted session and transcript remain at their
 	// newest state while the voice layer replays the exact historical reply.
@@ -1023,6 +1024,13 @@ type PartyBookingRequest struct {
 	UpdatedAt            time.Time           `json:"updated_at"`
 	ResolvedAt           *time.Time          `json:"resolved_at,omitempty"`
 	ResolvedBy           string              `json:"resolved_by,omitempty"`
+	projectionWarnings   []ConversationDetailWarning
+}
+
+type ConversationDetailWarning struct {
+	Code    string `json:"code"`
+	Section string `json:"section"`
+	Message string `json:"message"`
 }
 
 type PartyGuestService struct {

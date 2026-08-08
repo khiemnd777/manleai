@@ -207,6 +207,12 @@ Scheduling authority/internal calendar, Operations health/runtime limits/
 provider events/owner notifications, Access, audit events, and configuration
 transfers.
 
+Calls detail is independently retriable from the list/readiness aggregate.
+`GET /api/v2/platform/tenants/:tenant_id/calls/:session_id` returns optional
+safe `detail_warnings` when incompatible legacy optional JSON is omitted and
+uses section-specific sanitized error codes for actual transcript, handoff,
+party-request, or scheduling-evidence read failures.
+
 `backend/modules/pos` is the sole v2 owner of the rich `/services` and
 `/service-categories` workflow because it owns provider field authority,
 category aliases, and AI-bookable controls. `backend/modules/business` owns

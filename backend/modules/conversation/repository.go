@@ -438,7 +438,7 @@ func (r *Repository) GetSessionForOwner(ctx context.Context, salonID string, own
 		return nil, err
 	}
 	if err := r.hydrateSchedulingResultEvidence(ctx, salonID, ownerUserID, []*Session{session}); err != nil {
-		return nil, err
+		return nil, newConversationDetailReadError(conversationDetailStageSchedulingEvidence, err)
 	}
 	return session, nil
 }
@@ -1646,26 +1646,30 @@ func (r *Repository) getSession(ctx context.Context, where string, args ...any) 
 }
 
 func (r *Repository) loadSessionDetails(ctx context.Context, session *Session) error {
-	messages, err := r.listTranscript(ctx, session.SalonID, session.ID)
+	messages, warnings, err := r.listTranscript(ctx, session.SalonID, session.ID)
 	if err != nil {
-		return err
+		return newConversationDetailReadError(conversationDetailStageTranscript, err)
 	}
 	session.Transcript = messages
+	session.DetailWarnings = append(session.DetailWarnings, warnings...)
 
 	handoff, err := r.latestHandoff(ctx, session.SalonID, session.ID)
 	if err != nil {
-		return err
+		return newConversationDetailReadError(conversationDetailStageHandoff, err)
 	}
 	session.Handoff = handoff
 	partyRequest, err := r.latestPartyRequest(ctx, session.SalonID, session.ID)
 	if err != nil {
-		return err
+		return newConversationDetailReadError(conversationDetailStagePartyRequest, err)
 	}
 	session.PartyRequest = partyRequest
+	if partyRequest != nil {
+		session.DetailWarnings = append(session.DetailWarnings, partyRequest.projectionWarnings...)
+	}
 	return nil
 }
 
-func (r *Repository) listTranscript(ctx context.Context, salonID string, sessionID string) ([]TranscriptMessage, error) {
+func (r *Repository) listTranscript(ctx context.Context, salonID string, sessionID string) ([]TranscriptMessage, []ConversationDetailWarning, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id::text, session_id::text, salon_id::text, speaker, body, COALESCE(metadata, '{}'::jsonb), sequence, created_at
 		FROM call_transcript_messages
@@ -1674,25 +1678,55 @@ func (r *Repository) listTranscript(ctx context.Context, salonID string, session
 		ORDER BY sequence ASC
 	`, salonID, sessionID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
 	items := make([]TranscriptMessage, 0)
+	warnings := make([]ConversationDetailWarning, 0, 1)
+	metadataWarningAdded := false
 	for rows.Next() {
 		var item TranscriptMessage
 		var metadata []byte
 		if err := rows.Scan(&item.ID, &item.SessionID, &item.SalonID, &item.Speaker, &item.Body, &metadata, &item.Sequence, &item.CreatedAt); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if len(metadata) > 0 {
-			if err := json.Unmarshal(metadata, &item.Metadata); err != nil {
-				return nil, err
+			normalized, unsupportedShape, err := decodeTranscriptMetadata(metadata)
+			if err != nil {
+				return nil, nil, err
+			}
+			item.Metadata = normalized
+			if unsupportedShape && !metadataWarningAdded {
+				warnings = append(warnings, ConversationDetailWarning{
+					Code:    "TRANSCRIPT_METADATA_SHAPE_UNSUPPORTED",
+					Section: "transcript",
+					Message: "Unsupported legacy transcript metadata was omitted from this projection.",
+				})
+				metadataWarningAdded = true
 			}
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return items, warnings, nil
+}
+
+func decodeTranscriptMetadata(raw []byte) (map[string]any, bool, error) {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, false, err
+	}
+	if value == nil {
+		return nil, false, nil
+	}
+	metadata, ok := value.(map[string]any)
+	if !ok {
+		return nil, true, nil
+	}
+	return metadata, false, nil
 }
 
 func (r *Repository) latestHandoff(ctx context.Context, salonID string, sessionID string) (*HandoffRequest, error) {
@@ -1961,14 +1995,41 @@ func scanPartyBookingRequest(scanner interface{ Scan(dest ...any) error }) (*Par
 		return nil, err
 	}
 	if len(guestRequests) > 0 {
-		if err := json.Unmarshal(guestRequests, &item.GuestServiceRequests); err != nil {
+		normalized, unsupportedShape, err := decodePartyGuestServiceRequests(guestRequests)
+		if err != nil {
 			return nil, err
+		}
+		item.GuestServiceRequests = normalized
+		if unsupportedShape {
+			item.projectionWarnings = append(item.projectionWarnings, ConversationDetailWarning{
+				Code:    "PARTY_GUEST_REQUESTS_SHAPE_UNSUPPORTED",
+				Section: "party_request",
+				Message: "Unsupported legacy party guest details were omitted from this projection.",
+			})
 		}
 	}
 	if resolvedAt.Valid {
 		item.ResolvedAt = &resolvedAt.Time
 	}
 	return &item, nil
+}
+
+func decodePartyGuestServiceRequests(raw []byte) ([]PartyGuestService, bool, error) {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, false, err
+	}
+	if value == nil {
+		return nil, false, nil
+	}
+	if _, ok := value.([]any); !ok {
+		return nil, true, nil
+	}
+	var requests []PartyGuestService
+	if err := json.Unmarshal(raw, &requests); err != nil {
+		return nil, true, nil
+	}
+	return requests, false, nil
 }
 
 func applyWebhookPayload(item *WebhookEventLog, raw []byte) {

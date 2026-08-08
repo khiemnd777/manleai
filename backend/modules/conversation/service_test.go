@@ -9515,6 +9515,7 @@ type fakeConversationStore struct {
 	webhookEvents         []WebhookEventLog
 	archivedSessionID     string
 	redactedSessionID     string
+	getSessionErr         error
 }
 
 type fakeReplyGenerator struct {
@@ -9635,6 +9636,9 @@ func (f *fakeConversationStore) CreateSession(ctx context.Context, record NewSes
 }
 
 func (f *fakeConversationStore) GetSessionForOwner(ctx context.Context, salonID string, ownerUserID string, sessionID string) (*Session, error) {
+	if f.getSessionErr != nil {
+		return nil, f.getSessionErr
+	}
 	session := f.session
 	return &session, nil
 }

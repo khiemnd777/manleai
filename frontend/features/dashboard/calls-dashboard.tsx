@@ -112,12 +112,14 @@ type CorrectionTarget = {
 type CallsSurface = "tenant" | "platform";
 
 export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" }: { surface?: CallsSurface; salonID?: string } = {}) {
+  const sessionDetailRequestID = useRef(0);
   const realtimeEventsRequestID = useRef(0);
   const [salon, setSalon] = useState<Salon | null>(null);
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [sessions, setSessions] = useState<ConversationSession[]>([]);
   const [readinessSessions, setReadinessSessions] = useState<ConversationSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<ConversationSession | null>(null);
+  const [selectedSessionID, setSelectedSessionID] = useState("");
   const [realtimeEvents, setRealtimeEvents] = useState<RealtimeEventLog[]>([]);
   const [partyRequests, setPartyRequests] = useState<PartyBookingRequest[]>([]);
   const [services, setServices] = useState<POSService[]>([]);
@@ -136,6 +138,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
   const [readinessSessionsHasMore, setReadinessSessionsHasMore] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [sessionListLoading, setSessionListLoading] = useState(false);
+  const [sessionDetailLoading, setSessionDetailLoading] = useState(false);
   const [realtimeEventsLoading, setRealtimeEventsLoading] = useState(false);
   const [partyRequestsLoading, setPartyRequestsLoading] = useState(false);
   const [sending, setSending] = useState(false);
@@ -144,6 +147,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
   const [partyActionID, setPartyActionID] = useState("");
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
+  const [sessionDetailError, setSessionDetailError] = useState("");
   const [realtimeEventsError, setRealtimeEventsError] = useState("");
   const [success, setSuccess] = useState("");
   const [effectiveCapabilities, setEffectiveCapabilities] = useState<string[]>([]);
@@ -212,6 +216,29 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
     setReadinessSessionsHasMore(Boolean(response.has_more));
   }
 
+  async function loadSessionDetail(salonID: string, sessionID: string) {
+    const requestID = ++sessionDetailRequestID.current;
+    setSelectedSessionID(sessionID);
+    setSessionDetailLoading(true);
+    setSessionDetailError("");
+    clearCorrectionDraft();
+    try {
+      const detail = await callsApiRequest<ConversationSession>(
+        callsResourcePath(surface, salonID, `/conversation-sessions/${sessionID}`)
+      );
+      if (requestID !== sessionDetailRequestID.current) return;
+      setSelectedSession(detail);
+    } catch (err) {
+      if (requestID !== sessionDetailRequestID.current) return;
+      realtimeEventsRequestID.current += 1;
+      setRealtimeEvents([]);
+      setRealtimeEventsError("");
+      setSessionDetailError(err instanceof Error ? err.message : "Could not load call details.");
+    } finally {
+      if (requestID === sessionDetailRequestID.current) setSessionDetailLoading(false);
+    }
+  }
+
   async function load(
     filter: LifecycleFilter = lifecycleFilter,
     fullPage = initialLoading,
@@ -230,6 +257,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
         : await loadTenantCallsSalon();
       setSalon(activeSalon);
       if (!activeSalon) {
+        sessionDetailRequestID.current += 1;
         setVoiceStatus(null);
         setSessions([]);
         setReadinessSessions([]);
@@ -237,6 +265,9 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
         setPartyHasMore(false);
         setReadinessSessionsHasMore(false);
         setSelectedSession(null);
+        setSelectedSessionID("");
+        setSessionDetailError("");
+        setSessionDetailLoading(false);
         setRealtimeEvents([]);
         setPartyRequests([]);
         setServices([]);
@@ -270,13 +301,14 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
       const nextSummary =
         sessionsResponse.sessions.find((item) => item.id === currentID) ?? sessionsResponse.sessions[0] ?? null;
       if (nextSummary) {
-        const detail = await callsApiRequest<ConversationSession>(
-          callsResourcePath(surface, activeSalon.id, `/conversation-sessions/${nextSummary.id}`)
-        );
-        setSelectedSession(detail);
-        await loadRealtimeEventsForSession(activeSalon.id, detail);
+        setSelectedSession(nextSummary);
+        await loadSessionDetail(activeSalon.id, nextSummary.id);
       } else {
+        sessionDetailRequestID.current += 1;
         setSelectedSession(null);
+        setSelectedSessionID("");
+        setSessionDetailError("");
+        setSessionDetailLoading(false);
         setRealtimeEvents([]);
         clearCorrectionDraft();
       }
@@ -303,7 +335,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
   }, [salon?.id, partyStatusFilter, partyOffset, partyLimit]);
 
   useEffect(() => {
-    if (!salon || !selectedSession || selectedSession.channel !== "phone") {
+    if (!salon || !selectedSession || sessionDetailLoading || sessionDetailError || selectedSession.channel !== "phone") {
       realtimeEventsRequestID.current += 1;
       setRealtimeEvents([]);
       setRealtimeEventsError("");
@@ -311,7 +343,7 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
       return;
     }
     void loadRealtimeEvents(salon.id, selectedSession.id);
-  }, [salon?.id, selectedSession?.id, selectedSession?.updated_at, selectedSession?.channel]);
+  }, [salon?.id, selectedSession?.id, selectedSession?.updated_at, selectedSession?.channel, sessionDetailLoading, sessionDetailError]);
 
   async function loadRealtimeEvents(salonID: string, sessionID: string) {
     const requestID = ++realtimeEventsRequestID.current;
@@ -344,17 +376,6 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
     }
   }
 
-  async function loadRealtimeEventsForSession(salonID: string, session: ConversationSession) {
-    if (session.channel !== "phone") {
-      realtimeEventsRequestID.current += 1;
-      setRealtimeEvents([]);
-      setRealtimeEventsError("");
-      setRealtimeEventsLoading(false);
-      return;
-    }
-    await loadRealtimeEvents(salonID, session.id);
-  }
-
   async function reloadPartyRequests(salonID: string, status: PartyStatusFilter, offset = partyOffset, limit = partyLimit) {
     setPartyRequestsLoading(true);
     setActionError("");
@@ -381,6 +402,9 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
         body: JSON.stringify({ channel: "simulator" })
       });
       setSelectedSession(session);
+      setSelectedSessionID(session.id);
+      setSessionDetailError("");
+      setSessionDetailLoading(false);
       if (lifecycleFilter !== "active" || sessionOffset !== 0) {
         setSessionOffset(0);
         setLifecycleFilter("active");
@@ -419,6 +443,9 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
         }
       );
       setSelectedSession(updated);
+      setSelectedSessionID(updated.id);
+      setSessionDetailError("");
+      setSessionDetailLoading(false);
       clearCorrectionDraft();
       setMessage("");
       await reloadSessions(salon.id, lifecycleFilter, sessionOffset, sessionLimit);
@@ -433,16 +460,9 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
     if (!salon) return;
     setActionError("");
     setSuccess("");
-    try {
-      const detail = await callsApiRequest<ConversationSession>(
-        callsResourcePath(surface, salon.id, `/conversation-sessions/${sessionID}`)
-      );
-      setSelectedSession(detail);
-      await loadRealtimeEventsForSession(salon.id, detail);
-      clearCorrectionDraft();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Could not load transcript.");
-    }
+    const summary = sessions.find((item) => item.id === sessionID);
+    setSelectedSession((current) => summary ?? (current?.id === sessionID ? current : null));
+    await loadSessionDetail(salon.id, sessionID);
   }
 
   async function reloadSessions(salonID: string, filter: LifecycleFilter, offset = sessionOffset, limit = sessionLimit) {
@@ -464,6 +484,8 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
       );
       if (selectedSession?.id === item.id) {
         setSelectedSession(updated);
+        setSelectedSessionID(updated.id);
+        setSessionDetailError("");
       }
       setSuccess("Call session archived.");
       await reloadSessions(salon.id, lifecycleFilter, sessionOffset, sessionLimit);
@@ -487,6 +509,8 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
       );
       if (selectedSession?.id === item.id) {
         setSelectedSession(updated);
+        setSelectedSessionID(updated.id);
+        setSessionDetailError("");
         clearCorrectionDraft();
       }
       setSuccess("Transcript and customer details redacted.");
@@ -739,7 +763,27 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
           </div>
 
           <div className="mt-5 min-h-[360px] flex-1 overflow-y-auto rounded-md border border-line bg-slate-50 p-4">
-            {selectedSession?.transcript?.length ? (
+            {sessionDetailLoading ? (
+              <div className="space-y-3" aria-label="Loading call details">
+                <Skeleton className="h-16" />
+                <Skeleton className="h-16" />
+                <Skeleton className="h-16" />
+              </div>
+            ) : sessionDetailError ? (
+              <Alert title="Call details unavailable" message={sessionDetailError}>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="mt-4"
+                  onClick={() => {
+                    if (salon && selectedSessionID) void loadSessionDetail(salon.id, selectedSessionID);
+                  }}
+                >
+                  <RefreshCcw className="h-4 w-4" />
+                  Retry details
+                </Button>
+              </Alert>
+            ) : selectedSession?.transcript?.length ? (
               <div className="space-y-3">
                 {selectedSession.transcript.map((item) => (
                   <TranscriptBubble
@@ -754,6 +798,16 @@ export function CallsDashboard({ surface = "tenant", salonID: fixedSalonID = "" 
               <EmptyTranscript />
             )}
           </div>
+
+          {!sessionDetailLoading && !sessionDetailError && selectedSession?.detail_warnings?.length ? (
+            <div className="mt-4">
+              <Alert
+                type="warning"
+                title="Some legacy call details were omitted"
+                message={selectedSession.detail_warnings.map((item) => item.message).join(" ")}
+              />
+            </div>
+          ) : null}
 
           {correctionTarget ? (
             <form className="mt-4 rounded-md border border-line bg-white p-4" onSubmit={saveCorrection}>

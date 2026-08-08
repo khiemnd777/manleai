@@ -3,6 +3,7 @@ package conversation
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 
 	"github.com/gofiber/fiber/v2"
@@ -97,9 +98,32 @@ func (h *Handler) Get(c *fiber.Ctx) error {
 		return respond.Error(c, fiber.StatusNotFound, "CONVERSATION_NOT_FOUND", "Conversation session was not found.")
 	}
 	if err != nil {
+		if stage, ok := conversationDetailReadStage(err); ok {
+			requestID := ""
+			if value := c.Locals("requestid"); value != nil {
+				requestID = fmt.Sprint(value)
+			}
+			log.Printf("conversation detail read failed request_id=%q tenant_id=%q session_id=%q stage=%q", requestID, conversationSalonID(c), c.Params("session_id"), stage)
+			return respondConversationDetailReadError(c, stage)
+		}
 		return respond.Error(c, fiber.StatusInternalServerError, "CONVERSATION_FAILED", "Could not load conversation session.")
 	}
 	return h.resource(c, fiber.StatusOK, session, session.StateRevision)
+}
+
+func respondConversationDetailReadError(c *fiber.Ctx, stage conversationDetailStage) error {
+	switch stage {
+	case conversationDetailStageTranscript:
+		return respond.Error(c, fiber.StatusInternalServerError, "CONVERSATION_TRANSCRIPT_FAILED", "Could not load the conversation transcript.")
+	case conversationDetailStageHandoff:
+		return respond.Error(c, fiber.StatusInternalServerError, "CONVERSATION_HANDOFF_FAILED", "Could not load the conversation handoff details.")
+	case conversationDetailStagePartyRequest:
+		return respond.Error(c, fiber.StatusInternalServerError, "CONVERSATION_PARTY_REQUEST_FAILED", "Could not load the conversation party request.")
+	case conversationDetailStageSchedulingEvidence:
+		return respond.Error(c, fiber.StatusInternalServerError, "CONVERSATION_SCHEDULING_EVIDENCE_FAILED", "Could not load the conversation scheduling evidence.")
+	default:
+		return respond.Error(c, fiber.StatusInternalServerError, "CONVERSATION_FAILED", "Could not load conversation session.")
+	}
 }
 
 func (h *Handler) RealtimeEvents(c *fiber.Ctx) error {

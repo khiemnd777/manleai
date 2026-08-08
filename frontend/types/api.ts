@@ -1873,6 +1873,13 @@ export type ConversationSession = {
   transcript?: TranscriptMessage[];
   handoff?: HandoffRequest;
   party_request?: PartyBookingRequest;
+  detail_warnings?: ConversationDetailWarning[];
+};
+
+export type ConversationDetailWarning = {
+  code: string;
+  section: "transcript" | "handoff" | "party_request" | "scheduling_evidence";
+  message: string;
 };
 
 export type ConversationSchedulingResultEvidence = {
