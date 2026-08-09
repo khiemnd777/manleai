@@ -51,7 +51,7 @@ The backend is organized as:
 ```txt
 cmd/api              Fiber HTTP server
 cmd/worker           Independently scheduled POS sync, booking lease, quote cleanup, Square webhook/repair, notification delivery, call retention, and scheduling-PII retention worker entrypoint
-cmd/platform-access  Protected operator mutations for replay-safe Tenant login-email replacement and one-time first-Platform-Admin bootstrap; the bootstrap closes after an active Platform Admin exists
+cmd/platform-access  Protected operator mutations for replay-safe Tenant login-email replacement, one-time first-Platform-Admin bootstrap, and exact-single-active-Admin credential recovery with session revocation and immutable audit
 cmd/sample-data      Guarded sample_test fixture runner; invoked by local/pre-live orchestration after startup migration, never by the migration chain itself
 cmd/scheduling-load-harness Bounded isolated scheduling replay/CAS/atomicity verification; never a production runtime
 internal/config      environment config

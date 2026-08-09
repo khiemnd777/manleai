@@ -17,14 +17,15 @@ import (
 )
 
 var (
-	ErrValidation       = errors.New("access validation failed")
-	ErrForbidden        = errors.New("access forbidden")
-	ErrNotFound         = errors.New("access record not found")
-	ErrVersionConflict  = errors.New("access version conflict")
-	ErrActionConflict   = errors.New("access action conflict")
-	ErrBootstrapClosed  = errors.New("platform administrator bootstrap is closed")
-	ErrLastAdmin        = errors.New("last platform administrator cannot be revoked")
-	ErrIdentityConflict = errors.New("access identity conflict")
+	ErrValidation        = errors.New("access validation failed")
+	ErrForbidden         = errors.New("access forbidden")
+	ErrNotFound          = errors.New("access record not found")
+	ErrVersionConflict   = errors.New("access version conflict")
+	ErrActionConflict    = errors.New("access action conflict")
+	ErrBootstrapClosed   = errors.New("platform administrator bootstrap is closed")
+	ErrLastAdmin         = errors.New("last platform administrator cannot be revoked")
+	ErrIdentityConflict  = errors.New("access identity conflict")
+	ErrRecoveryInvariant = errors.New("platform administrator recovery invariant failed")
 )
 
 const (

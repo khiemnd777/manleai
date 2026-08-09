@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -25,15 +26,17 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: platform-access <bootstrap-admin|rename-tenant-email> [options]")
+		return errors.New("usage: platform-access <bootstrap-admin|rename-tenant-email|rotate-single-admin-password> [options]")
 	}
 	switch args[0] {
 	case "bootstrap-admin":
 		return runBootstrapAdmin(ctx, args[1:])
 	case "rename-tenant-email":
 		return runRenameTenantEmail(ctx, args[1:])
+	case "rotate-single-admin-password":
+		return runRotateSingleAdminPassword(ctx, args[1:])
 	default:
-		return errors.New("usage: platform-access <bootstrap-admin|rename-tenant-email> [options]")
+		return errors.New("usage: platform-access <bootstrap-admin|rename-tenant-email|rotate-single-admin-password> [options]")
 	}
 }
 
@@ -111,6 +114,49 @@ func runRenameTenantEmail(ctx context.Context, args []string) error {
 	return nil
 }
 
+func runRotateSingleAdminPassword(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("rotate-single-admin-password", flag.ContinueOnError)
+	passwordFile := flags.String("password-file", "", "path to a regular 0600 file containing the replacement password")
+	actionKey := flags.String("action-key", "", "stable retry-safe action key")
+	reason := flags.String("reason", "", "bounded operator change reference")
+	outputFile := flags.String("output-file", "", "new private file for the bounded recovery result")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*passwordFile) == "" || strings.TrimSpace(*actionKey) == "" || strings.TrimSpace(*reason) == "" || strings.TrimSpace(*outputFile) == "" {
+		return errors.New("password-file, action-key, reason, and output-file are required")
+	}
+	password, err := readPrivatePasswordFile(*passwordFile)
+	if err != nil {
+		return err
+	}
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash Platform administrator password: %w", err)
+	}
+	passwordFingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
+
+	db, repository, err := openAccessRepository(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	result, err := repository.RotateSinglePlatformAdminPassword(ctx, access.RotateSinglePlatformAdminPasswordRequest{
+		PasswordHash:        string(passwordHash),
+		PasswordFingerprint: passwordFingerprint,
+		ActionKey:           *actionKey,
+		Reason:              *reason,
+	})
+	if err != nil {
+		return fmt.Errorf("rotate single Platform administrator password: %w", err)
+	}
+	if err := writePrivateJSONFile(*outputFile, result); err != nil {
+		return fmt.Errorf("write recovery result: %w", err)
+	}
+	return nil
+}
+
 func openAccessRepository(ctx context.Context) (*sql.DB, *access.Repository, error) {
 	cfg := config.Load()
 	databaseURL := cfg.MigrationDatabaseURL
@@ -141,4 +187,32 @@ func readPrivatePasswordFile(filePath string) (string, error) {
 		return "", errors.New("Platform administrator password must contain at least 12 characters")
 	}
 	return password, nil
+}
+
+func writePrivateJSONFile(filePath string, value any) (returnErr error) {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return errors.New("output file is required")
+	}
+	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	succeeded := false
+	defer func() {
+		if closeErr := file.Close(); returnErr == nil && closeErr != nil {
+			returnErr = closeErr
+		}
+		if !succeeded {
+			_ = os.Remove(filePath)
+		}
+	}()
+	if err := json.NewEncoder(file).Encode(value); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	succeeded = true
+	return nil
 }

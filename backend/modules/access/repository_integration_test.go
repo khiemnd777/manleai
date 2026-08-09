@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/manleai/ai-receptionist/internal/database"
 	"github.com/manleai/ai-receptionist/internal/middleware"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestAccessRepositoryTenantPlatformAndPIIBoundaries(t *testing.T) {
@@ -528,6 +530,153 @@ func TestAccessRepositoryRenameTenantEmailRejectsWrongRealmAndOccupiedTarget(t *
 	}
 	if persistedEmail != tenantEmail {
 		t.Fatalf("Tenant email=%q, want unchanged %q", persistedEmail, tenantEmail)
+	}
+}
+
+func TestRotateSinglePlatformAdminPasswordIsAtomicAuditedAndReplaySafe(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not configured")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := database.Migrate(ctx, db); err != nil {
+		t.Fatalf("migrate test database: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE platform_role_assignments SET status='revoked' WHERE status='active'`); err != nil {
+		t.Fatalf("isolate active Platform administrators: %v", err)
+	}
+
+	suffix := uuid.NewString()
+	adminEmail := "recovery-admin-" + suffix + "@example.test"
+	adminID := insertAccessTestUser(t, db, adminEmail, PrincipalScopePlatform)
+	var assignmentID string
+	var initialVersion int64
+	if err := db.QueryRowContext(ctx, `
+		INSERT INTO platform_role_assignments (
+			user_id, role_id, status, created_by_user_id, updated_by_user_id
+		)
+		SELECT $1, role.id, 'active', $1, $1
+		FROM roles AS role
+		WHERE role.name = 'platform_admin' AND role.scope = 'platform'
+		RETURNING id::text, version
+	`, adminID).Scan(&assignmentID, &initialVersion); err != nil {
+		t.Fatalf("seed recovery Platform administrator: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO refresh_tokens(user_id,token_hash,expires_at)
+		VALUES($1,$2,now()+interval '1 hour')
+	`, adminID, "recovery-token-"+suffix); err != nil {
+		t.Fatalf("seed recovery refresh token: %v", err)
+	}
+
+	password := "replacement-secret-" + suffix
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash replacement password: %v", err)
+	}
+	request := RotateSinglePlatformAdminPasswordRequest{
+		PasswordHash:        string(passwordHash),
+		PasswordFingerprint: strings.Repeat("a", 64),
+		ActionKey:           "platform-admin-recovery-" + suffix,
+		Reason:              "RECOVERY-" + suffix,
+	}
+	repository := NewRepository(db)
+	result, err := repository.RotateSinglePlatformAdminPassword(ctx, request)
+	if err != nil {
+		t.Fatalf("rotate single Platform administrator password: %v", err)
+	}
+	if result.UserID != adminID || result.Email != adminEmail || result.AssignmentID != assignmentID || result.AssignmentVersion != initialVersion+1 || result.RevokedRefreshTokens != 1 || result.Replayed {
+		t.Fatalf("rotation result=%#v", result)
+	}
+
+	var persistedHash string
+	var persistedEmail string
+	var persistedScope PrincipalScope
+	var persistedStatus string
+	if err := db.QueryRowContext(ctx, `SELECT password_hash,email,principal_scope,status FROM users WHERE id=$1`, adminID).Scan(&persistedHash, &persistedEmail, &persistedScope, &persistedStatus); err != nil {
+		t.Fatalf("load recovered Platform administrator: %v", err)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(persistedHash), []byte(password)) != nil {
+		t.Fatal("replacement password was not persisted")
+	}
+	if persistedEmail != adminEmail || persistedScope != PrincipalScopePlatform || persistedStatus != "active" {
+		t.Fatalf("identity changed unexpectedly: email=%q scope=%q status=%q", persistedEmail, persistedScope, persistedStatus)
+	}
+	var role string
+	var assignmentStatus string
+	var assignmentVersion int64
+	if err := db.QueryRowContext(ctx, `
+		SELECT role.name,assignment.status,assignment.version
+		FROM platform_role_assignments AS assignment
+		JOIN roles AS role ON role.id=assignment.role_id
+		WHERE assignment.id=$1
+	`, assignmentID).Scan(&role, &assignmentStatus, &assignmentVersion); err != nil {
+		t.Fatalf("load recovered assignment: %v", err)
+	}
+	if role != RolePlatformAdmin || assignmentStatus != "active" || assignmentVersion != initialVersion+1 {
+		t.Fatalf("assignment changed unexpectedly: role=%q status=%q version=%d", role, assignmentStatus, assignmentVersion)
+	}
+	var refreshTokenCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM refresh_tokens WHERE user_id=$1`, adminID).Scan(&refreshTokenCount); err != nil {
+		t.Fatalf("count recovery refresh tokens: %v", err)
+	}
+	if refreshTokenCount != 0 {
+		t.Fatalf("refresh token count=%d, want 0", refreshTokenCount)
+	}
+	var responsePayload string
+	var eventDetails string
+	if err := db.QueryRowContext(ctx, `
+		SELECT action.response_payload::text,event.details::text
+		FROM access_control_actions AS action
+		JOIN access_control_events AS event ON event.action_id=action.id
+		WHERE action.actor_user_id=$1 AND action.action_key=$2
+	`, adminID, request.ActionKey).Scan(&responsePayload, &eventDetails); err != nil {
+		t.Fatalf("load recovery audit: %v", err)
+	}
+	for _, secret := range []string{adminEmail, password, persistedHash, request.PasswordFingerprint} {
+		if strings.Contains(responsePayload, secret) || strings.Contains(eventDetails, secret) {
+			t.Fatalf("recovery audit leaked protected value %q", secret)
+		}
+	}
+	if !strings.Contains(eventDetails, `"password_changed": true`) && !strings.Contains(eventDetails, `"password_changed":true`) {
+		t.Fatalf("recovery event missing password_changed evidence: %s", eventDetails)
+	}
+
+	replay, err := repository.RotateSinglePlatformAdminPassword(ctx, request)
+	if err != nil {
+		t.Fatalf("replay Platform administrator recovery: %v", err)
+	}
+	if !replay.Replayed || replay.UserID != adminID || replay.AssignmentVersion != result.AssignmentVersion || replay.RevokedRefreshTokens != 1 {
+		t.Fatalf("recovery replay=%#v", replay)
+	}
+	request.PasswordFingerprint = strings.Repeat("b", 64)
+	if _, err := repository.RotateSinglePlatformAdminPassword(ctx, request); !errors.Is(err, ErrActionConflict) {
+		t.Fatalf("changed password action replay error=%v, want action conflict", err)
+	}
+
+	secondAdminID := insertAccessTestUser(t, db, "recovery-second-"+suffix+"@example.test", PrincipalScopePlatform)
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO platform_role_assignments (user_id,role_id,status,created_by_user_id,updated_by_user_id)
+		SELECT $1,role.id,'active',$1,$1 FROM roles AS role
+		WHERE role.name='platform_admin' AND role.scope='platform'
+	`, secondAdminID); err != nil {
+		t.Fatalf("seed second active Platform administrator: %v", err)
+	}
+	request.ActionKey = "platform-admin-recovery-multiple-" + suffix
+	if _, err := repository.RotateSinglePlatformAdminPassword(ctx, request); !errors.Is(err, ErrRecoveryInvariant) {
+		t.Fatalf("multiple-admin recovery error=%v, want recovery invariant", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE platform_role_assignments SET status='revoked' WHERE status='active'`); err != nil {
+		t.Fatalf("remove active Platform administrators: %v", err)
+	}
+	request.ActionKey = "platform-admin-recovery-zero-" + suffix
+	if _, err := repository.RotateSinglePlatformAdminPassword(ctx, request); !errors.Is(err, ErrRecoveryInvariant) {
+		t.Fatalf("zero-admin recovery error=%v, want recovery invariant", err)
 	}
 }
 

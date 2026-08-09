@@ -286,6 +286,11 @@ run_self_test() {
   bash -n "$script_dir/production-domain-smoke.sh"
   bash -n "$script_dir/production-domain-smoke-test.sh"
   bash "$script_dir/production-domain-smoke-test.sh"
+  bash -n "$script_dir/production-platform-admin-credential-recovery.sh"
+  bash -n "$script_dir/production-platform-admin-credential-recovery-test.sh"
+  bash "$script_dir/production-platform-admin-credential-recovery-test.sh"
+  bash -n "$script_dir/encrypt-platform-admin-credential-handoff-test.sh"
+  bash "$script_dir/encrypt-platform-admin-credential-handoff-test.sh"
   bash -n "$manifest"
   validate_deployment_workflow_contract
   clone_database="$(build_clone_database_name "manleai_phase10_release_gate_database_with_a_long_name" "integration" "19" "12345")"

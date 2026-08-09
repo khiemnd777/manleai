@@ -675,6 +675,43 @@ secret after success. The password must be delivered to the approved operator
 out of band. The existing Tenant password is unchanged. This is a bounded
 operator workflow, not an HTTP endpoint and not a general Tenant email editor.
 
+### Platform Administrator credential recovery
+
+Use `.github/workflows/production-platform-admin-credential-recovery.yml` only
+for an approved recovery when the production account audit proves exactly two
+active identities: one Tenant identity, one Platform identity, exactly one
+active `platform_admin` assignment, and no legacy `super_admin`. This is a
+protected operator workflow, not an HTTP endpoint or a second Platform roles
+UI.
+
+The workflow requires the exact running release tag, the literal confirmation
+`ROTATE_PRODUCTION_PLATFORM_ADMIN_CREDENTIAL`, and an opaque approved change
+reference. Put a generated replacement password of at least 20 characters in
+the temporary protected production environment secret
+`PLATFORM_ADMIN_RECOVERY_PASSWORD`. Generate an ephemeral RSA key pair locally
+and pass only its base64-encoded public-key PEM as
+`recovery_public_key_b64`. Keep the private key outside GitHub and the VPS.
+
+The reviewed `platform-access rotate-single-admin-password` operator executes
+one serializable transaction. It fails closed unless exactly one active
+Platform identity has exactly one active Platform Admin assignment; changes
+only that user's bcrypt password hash; advances the assignment version; revokes
+all refresh tokens; and records a replay-safe immutable access action/event.
+Email, role, status, Tenant identity, salon ownership, memberships, salon
+assignments, PII grants, and salon data are not mutated. The password,
+password hash, password fingerprint, and Admin email are excluded from audit
+payloads and workflow logs.
+
+The bounded result containing the current Admin login email is copied through
+SSH, immediately encrypted on the runner with an ephemeral AES-256-GCM content
+key wrapped by RSA-OAEP-SHA256, and uploaded for one day as the only recovery
+artifact. Plaintext result/password files are removed from the runner and VPS
+in `always()` cleanup. After decrypting the artifact locally, delete the
+temporary GitHub password secret and the downloaded artifact, verify login,
+and discard the ephemeral password/private-key files. A new dispatch creates a
+new action key; rerunning one GitHub run reuses its stable action key and exact
+password fingerprint.
+
 ## Opt-In Sample Test Data
 
 V73 adds only the `live|sample_test` classification contract to `users` and

@@ -62,6 +62,13 @@ RPO/RTO evidence.
   Serialize Platform role changes and atomically revoke active salon/PII
   delegation so concurrent demotions cannot remove the last admin and role
   reactivation cannot revive stale access.
+- [x] Add protected exact-single-active-Platform-Admin credential recovery:
+  serializable count/role/scope/status invariant, bcrypt replacement, assignment
+  version fence, refresh-token revocation, replay-safe immutable audit without
+  credential/email leakage, exact running-release check, encrypted one-day
+  handoff artifact, and runner/VPS plaintext cleanup. The recovery does not
+  change RBAC, Tenant identity, salon ownership, delegated access, or salon
+  data and is not exposed as an HTTP API.
 - [x] Require explicit `salon_id` on authenticated Square control/write routes
   and remove primary-salon middleware fallback before enabling multi-salon
   Platform actors.

@@ -22,6 +22,8 @@ web applications, package manifests, or lockfiles fail the gate.
 The self-test also parses the local restart, migration checksum preflight,
 pre-live sample-target preflight, and post-migration data-profile guard scripts;
 syntax-checks and executes the isolated public-domain smoke regression test;
+syntax-checks the protected Platform Admin credential-recovery operator and
+executes its workflow security-marker contract;
 and rejects a CI/CD workflow that eagerly
 promotes candidate `project.env`, loses the previous env/Compose rollback
 boundary, or promotes env/current before edge upsert and public smoke. Missing,
