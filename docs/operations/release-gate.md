@@ -129,6 +129,11 @@ coverage includes:
   durable per-capability verification evidence, bounded worker discovery, and
   exact returned-tenant processing; release tests use fake transports and do
   not call OpenAI;
+- V90 live-row eligibility rechecks for every ranked worker claim introduced
+  by V79/V84: POS sync, Square booking webhooks, owner/customer notifications,
+  and OpenAI runtime verification. High-contention PostgreSQL coverage requires
+  exactly one claim winner and, for notification queues, exactly one immutable
+  attempt and claim event;
 - tenant quota/usage accounting, provider-write rejection, and fair worker
   claim limits without cross-tenant starvation;
 - immutable V74 Tenant/Platform principal scope, fail-closed mixed-identity

@@ -76,6 +76,12 @@ deduplicated and an older/lower-rank callback cannot downgrade a later state.
 
 Only failures proven to occur before provider dispatch use bounded automatic
 retry, with at most five delivery attempts and bounded exponential delay.
+V90 makes the database claim itself single-winner: tenant-fair ranking remains
+bounded and lock-skipping, but the live row must still be queued/failed, due,
+and below its attempt limit both when it is locked and in the atomic update.
+The customer-notification queue uses the same rule, including `quiet_hours` as
+an eligible due state. A stale ranking snapshot cannot create a second claim,
+attempt, or provider-dispatch opportunity.
 Lease expiry before `dispatch_started_at` is safe to reclaim. Lease expiry,
 network failure, or response parsing failure after dispatch may mean Twilio
 accepted the message; these cases move to `dead_letter` with

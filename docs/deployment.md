@@ -338,7 +338,7 @@ CREATE ROLE manleai_runtime LOGIN PASSWORD '<separate-secret>'
 ```
 
 Do not put the password in shell history. The candidate API uses the migration
-connection to apply all pending release migrations through V80 and grant
+connection to apply all pending release migrations through V90 and grant
 table/sequence/function privileges to the
 already-existing runtime role, then closes that connection. API requests and
 the worker use only the runtime connection. The worker does not receive

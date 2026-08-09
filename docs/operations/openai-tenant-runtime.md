@@ -73,6 +73,11 @@ and tenant queue age. Investigation may inspect safe run/capability status,
 latency, bounded provider request ID, and error code. Do not expose encrypted
 secrets, the credential HMAC, provider response bodies, or raw error messages.
 
+V90 keeps the V84 claim API and three-attempt lease policy unchanged while
+rechecking current status, attempt count, and lease expiry on the exact row
+version locked and updated by the worker. Concurrent workers cannot both claim
+one queued or expired run from a stale ranked snapshot.
+
 ## Configuration Transfer
 
 Platform configuration schema v10 transfers only portable OpenAI model, voice,

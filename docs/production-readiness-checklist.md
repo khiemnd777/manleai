@@ -614,6 +614,11 @@ RPO/RTO evidence.
   and adds runtime-role negative tests for unbound and cross-tenant base-table
   access. V80 remains blocked from production cutover until the V79-aware image
   is deployed on every replica and all provider/worker paths are observed.
+- [x] Harden every ranked V79/V84 worker claim with V90 live-row eligibility
+  rechecks at candidate lock and final update time. Preserve tenant fairness,
+  limits, leases, signatures, and result contracts while proving exactly one
+  winner under contention for POS sync, Square booking webhook, owner/customer
+  notification, and OpenAI runtime-verification queues.
 - [ ] Phase 15 contract production cutover: record the exact V79-aware image,
   drain every older API/worker replica, observe all provider callbacks and
   worker classes, then apply V80 and verify post-migration negative tests plus

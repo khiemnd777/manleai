@@ -339,6 +339,17 @@ locators and V79 worker discovery/claim functions may operate unbound under
 repository work. V80 is code-ready evidence only until the V79-aware image and
 all provider/worker paths have been observed in the target environment.
 
+V90 preserves the V79/V84 worker function signatures, tenant-fair ranking,
+bounded limits, and `SKIP LOCKED` behavior while closing a Read Committed stale-
+candidate race. POS sync, Square booking webhook, owner notification, customer
+notification, and OpenAI runtime-verification claims now recheck the complete
+queue eligibility predicate on the live locked row and again in the final
+atomic `UPDATE`. A row claimed or exhausted by a concurrent worker therefore
+cannot receive a second claim token or attempt from an earlier ranking
+snapshot. V90 does not rewrite application data, change RLS, change provider
+dispatch rules, or alter any API contract; Square calendar repair already
+locks and evaluates live eligibility directly and is deliberately unchanged.
+
 The application query layer preserves the same split. Live provider/worker
 conversation, salon-settings, scheduling-origin, booking, `owner_manual`,
 `manleai_calendar`, and external-provider scheduling-evidence repository

@@ -234,3 +234,14 @@ columns and do not erase V84 identity columns on an existing row. Roll forward
 to resume OpenAI, and require a new fresh run after any config or credential
 revision change. Detailed procedure and evidence rules are in
 [OpenAI Tenant-Bound Runtime Operations](openai-tenant-runtime.md).
+
+## V90 Worker Claim Atomicity Rollback Note
+
+V90 replaces five `SECURITY DEFINER` worker claim function bodies without
+changing their names, arguments, result columns, grants, queue states, limits,
+or lease durations. It adds only live-row eligibility predicates at candidate
+lock and final update time. Current and previous V90-unaware application images
+remain call-compatible with V90, so an image rollback leaves the migration in
+place. Do not restore V79/V84 function bodies or restore the database to remove
+V90: doing so would reopen duplicate POS sync, Square webhook, notification,
+and OpenAI verification claims under contention.

@@ -52,7 +52,9 @@ unknown-outcome, retry, or reconciliation safeguard below.
 - Business hour period sync from the selected Square location
 - Customer sync from Square Customers search pagination
 - Calendar appointment list sync from Square Bookings into local appointment mirrors
-- Signed booking webhook ingestion with durable event dedupe and fenced worker claims
+- Signed booking webhook ingestion with durable event dedupe, claim-token
+  fencing, and V90 live-row eligibility rechecks that prevent two workers from
+  claiming one pending/failed/expired event
 - Scheduled calendar repair as a webhook backstop
 - Authenticated owner-scoped webhook event metrics/list/detail plus backend-
   gated, action-key-idempotent safe requeue inside the connected Square card
@@ -67,7 +69,8 @@ unknown-outcome, retry, or reconciliation safeguard below.
   external-only new-test/AI-enable gates
 - Sync logs
 - POS error logs
-- Provider capability reporting for POS sync jobs
+- Provider capability reporting for POS sync jobs; their tenant-fair worker
+  claims use the same V90 live-row status/due/attempt recheck
 - Booking-time customer link persistence through `pos_entity_links`
 - Active-provider switch readiness gate, currently blocked because Square is
   the only installed native POS adapter
