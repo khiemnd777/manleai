@@ -3,7 +3,9 @@ package migrations
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -87,7 +89,7 @@ func TestV90WorkerClaimFunctionsHaveOneWinnerUnderContention(t *testing.T) {
 
 	t.Run("customer notification", func(t *testing.T) {
 		ownerID, salonID := seedV90Salon(t, ctx, db, "customer-notification")
-		destination := "+1312555" + strings.ReplaceAll(uuid.NewString(), "-", "")[0:4]
+		destination := newV90CustomerDestination()
 		var consentID string
 		if err := db.QueryRowContext(ctx, `
 			INSERT INTO customer_sms_consents(
@@ -158,6 +160,27 @@ func TestV90WorkerClaimFunctionsHaveOneWinnerUnderContention(t *testing.T) {
 			t.Fatalf("OpenAI verification state=%q/%d err=%v", status, attempts, err)
 		}
 	})
+}
+
+func TestV90CustomerDestinationFixtureIsAlwaysE164(t *testing.T) {
+	e164 := regexp.MustCompile(`^\+[1-9][0-9]{7,14}$`)
+	destinations := make(map[string]struct{})
+	for index := 0; index < 512; index++ {
+		destination := newV90CustomerDestination()
+		if !e164.MatchString(destination) {
+			t.Fatalf("generated destination %q is not E.164", destination)
+		}
+		destinations[destination] = struct{}{}
+	}
+	if len(destinations) < 2 {
+		t.Fatal("generated destination fixture did not vary")
+	}
+}
+
+func newV90CustomerDestination() string {
+	id := uuid.New()
+	numericSuffix := (int(id[0])<<8 | int(id[1])) % 10000
+	return fmt.Sprintf("+1312555%04d", numericSuffix)
 }
 
 func seedV90Salon(t *testing.T, ctx context.Context, db *sql.DB, label string) (ownerID, salonID string) {
