@@ -717,6 +717,18 @@ history guards; V51 adds lifecycle release ownership, event-version uniqueness,
 terminal cancellation, and exact old/new plan graph guards. The configuration
 read aggregate does not expose either immutable event ledger.
 
+V91 aligns every ManleAI Calendar write and audit guard with the authenticated
+actor boundary. Tenant actors require an active authorized membership;
+Platform actors require the salon-scoped `technical.write` capability. Config
+events, activation, and exception rows store the actual authorized actor ID;
+the backend never substitutes `salons.owner_user_id` for Platform work.
+
+The normalized Platform UI uses the equivalent `/api/v2/platform/tenants/
+:tenant_id/scheduling/internal-calendar` resource: `PUT /policy`, `PUT /hours`,
+`GET|PUT /staff/:staff_id`, `GET|PUT /services/:service_id`, resource and
+exception children, and `POST /activation`. The older Technical routes below
+remain compatibility aliases and use the same service/repository contract.
+
 Implemented routes:
 
 | Method and path | Purpose | Successful response |

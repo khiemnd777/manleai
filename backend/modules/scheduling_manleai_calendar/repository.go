@@ -769,15 +769,7 @@ func loadExceptions(ctx context.Context, q dbReader, salonID string) ([]Calendar
 func requireCalendarActor(ctx context.Context, q dbReader, salonID string, actorUserID string) error {
 	var exists bool
 	if err := q.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM salons salon
-			WHERE salon.id = $1
-			  AND (
-			      public.has_active_tenant_membership(salon.id, $2::uuid)
-			      OR public.has_platform_salon_capability(salon.id, $2::uuid, 'technical.write')
-			  )
-		)
+		SELECT public.app_manleai_calendar_write_access($1::uuid, $2::uuid)
 	`, salonID, actorUserID).Scan(&exists); err != nil {
 		return err
 	}

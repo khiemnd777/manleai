@@ -350,6 +350,13 @@ snapshot. V90 does not rewrite application data, change RLS, change provider
 dispatch rules, or alter any API contract; Square calendar repair already
 locks and evaluates live eligibility directly and is deliberately unchanged.
 
+V91 removes an older Calendar-only actor mismatch without widening the API
+surface. The Calendar repository, activation guard, exception guard, and
+immutable config-event guard now share one salon-scoped predicate for active
+Tenant membership or Platform `technical.write`. Audit rows retain the actual
+authorized actor, so Platform Admin/Ops mutations no longer fail after passing
+the application RBAC gate and are never rewritten as Owner activity.
+
 The application query layer preserves the same split. Live provider/worker
 conversation, salon-settings, scheduling-origin, booking, `owner_manual`,
 `manleai_calendar`, and external-provider scheduling-evidence repository

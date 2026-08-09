@@ -245,3 +245,15 @@ remain call-compatible with V90, so an image rollback leaves the migration in
 place. Do not restore V79/V84 function bodies or restore the database to remove
 V90: doing so would reopen duplicate POS sync, Square webhook, notification,
 and OpenAI verification claims under contention.
+
+## V91 ManleAI Calendar Actual-Actor Rollback Note
+
+V91 replaces Calendar authorization trigger functions and introduces the
+stable `app_manleai_calendar_write_access(UUID, UUID)` predicate. It does not
+rewrite configuration, exception, activation, or immutable event rows. Current
+and previous application images remain call-compatible, so an image rollback
+leaves V91 applied. Do not restore the V48 owner-only trigger bodies: that would
+again allow the application RBAC guard to authorize Platform `technical.write`
+and then roll the transaction back at its audit event. Diagnose authorization
+through the actual Tenant membership or Platform capability while preserving
+the recorded actor ID.

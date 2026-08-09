@@ -335,8 +335,13 @@ exceptions; immutable configuration events; API constraints; and typed
 configuration/execution blockers. Provider-imported or migrated business hours
 do not satisfy this authority's readiness.
 
-Every mutation is owner-scoped and requires a stable `action_key` plus
-`expected_config_version`. Exact key/fingerprint replay returns the current
+Every mutation is salon-scoped and requires a stable `action_key` plus
+`expected_config_version`. Tenant routes require an active authorized Tenant
+membership; Platform routes require the actor's salon-scoped
+`technical.write` capability. V91 makes the repository, activation,
+exception, and immutable configuration-event database guards use that same
+predicate while preserving the actual actor ID instead of impersonating the
+salon Owner. Exact key/fingerprint replay returns the current
 aggregate without a second logical mutation; changed payload reuse conflicts,
 and stale fences fail. The returned config version is monotonic and may advance
 more than once when one logical replacement mutates multiple child rows; it is

@@ -106,6 +106,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   deploy/production-platform-admin-credential-recovery-test.sh
   backend/migrations/v90_safety_test.go
   backend/migrations/v90_integration_test.go
+  backend/migrations/v91_safety_test.go
   backend/migrations/v89_safety_test.go
   backend/migrations/v86_safety_test.go
   backend/migrations/v87_safety_test.go
@@ -218,6 +219,7 @@ SECURITY_CONTRACT_TEST_FILES=(
   backend/modules/scheduling/handler_test.go
   backend/modules/scheduling/service_test.go
   backend/modules/scheduling_manleai_calendar/execution_repository_integration_test.go
+  backend/modules/scheduling_manleai_calendar/platform_actor_integration_test.go
   backend/modules/scheduling_manleai_calendar/platform_v2_routes_test.go
   backend/modules/scheduling_manleai_calendar/executor_test.go
   backend/modules/scheduling_owner_manual/repository_integration_test.go
