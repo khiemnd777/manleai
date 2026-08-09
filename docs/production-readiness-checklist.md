@@ -69,6 +69,14 @@ RPO/RTO evidence.
   handoff artifact, and runner/VPS plaintext cleanup. The recovery does not
   change RBAC, Tenant identity, salon ownership, delegated access, or salon
   data and is not exposed as an HTTP API.
+- [x] Add protected exact-salon active-Tenant-Owner credential recovery:
+  serializable email/ownership/scope/status fence, bcrypt replacement,
+  refresh-token revocation, replay-safe credential-free immutable audit, exact
+  two-account and running-release checks, runner/VPS plaintext cleanup, and a
+  handoff rule that retains the operator copy until login/logout verification.
+  The recovery changes no identity, ownership, membership, RBAC, salon,
+  scheduling, provider, or AI runtime state and is not exposed as an HTTP API
+  or UI.
 - [x] Require explicit `salon_id` on authenticated Square control/write routes
   and remove primary-salon middleware fallback before enabling multi-salon
   Platform actors.

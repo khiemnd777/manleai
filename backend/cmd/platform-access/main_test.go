@@ -36,6 +36,33 @@ func TestReadPrivatePasswordFileRequiresOwnerOnlyPermissions(t *testing.T) {
 	}
 }
 
+func TestReadPrivateEmailFileRequiresOneOwnerOnlyLine(t *testing.T) {
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "tenant-owner-email")
+	if err := os.WriteFile(filePath, []byte("Owner@Example.com\n"), 0o600); err != nil {
+		t.Fatalf("write email fixture: %v", err)
+	}
+	email, err := readPrivateEmailFile(filePath)
+	if err != nil {
+		t.Fatalf("read private email file: %v", err)
+	}
+	if email != "owner@example.com" {
+		t.Fatalf("email=%q, want normalized exact address", email)
+	}
+	if err := os.WriteFile(filePath, []byte("owner@example.com\nsecond@example.com\n"), 0o600); err != nil {
+		t.Fatalf("write multi-line email fixture: %v", err)
+	}
+	if _, err := readPrivateEmailFile(filePath); err == nil {
+		t.Fatal("multi-line email file was accepted")
+	}
+	if err := os.Chmod(filePath, 0o644); err != nil {
+		t.Fatalf("make email fixture unsafe: %v", err)
+	}
+	if _, err := readPrivateEmailFile(filePath); err == nil {
+		t.Fatal("world-readable email file was accepted")
+	}
+}
+
 func TestWritePrivateJSONFileCreatesOwnerOnlyFileAndRefusesOverwrite(t *testing.T) {
 	tempDir := t.TempDir()
 	filePath := filepath.Join(tempDir, "recovery-result.json")

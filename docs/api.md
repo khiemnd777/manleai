@@ -1022,6 +1022,14 @@ assignment with `platform.access.manage`. A legacy `super_admin` role, a Tenant
 membership, a caller-supplied header, or a JWT role claim does not satisfy that
 check. Platform Ops cannot manage access.
 
+Tenant Owner password recovery is not an HTTP or UI capability. Backend support
+exists only as the protected `platform-access rotate-tenant-owner-password`
+operator. It requires one exact salon UUID and its current active Tenant Owner
+email, changes only the bcrypt password hash, revokes that identity's refresh
+tokens, and records credential-free replay-safe access audit evidence. It does
+not change `salons.owner_user_id`, memberships, roles, principal scope, account
+status, salon data, scheduling state, provider configuration, or AI runtime.
+
 `GET /api/platform/access/platform-users?query=<name-or-email>&limit=50`
 
 `POST /api/platform/access/platform-users`

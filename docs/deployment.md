@@ -717,6 +717,40 @@ and discard the ephemeral password/private-key files. A new dispatch creates a
 new action key; rerunning one GitHub run reuses its stable action key and exact
 password fingerprint.
 
+### Tenant Owner credential recovery
+
+Use `.github/workflows/production-tenant-owner-credential-recovery.yml` only
+for an approved recovery when the production account audit proves exactly two
+active identities: one Tenant identity, one Platform identity, exactly one
+active `platform_admin` assignment, and no disabled, invited, or legacy
+`super_admin` identity. This is a protected operator workflow; backend support
+exists, but no Tenant password-recovery HTTP endpoint or UI exists.
+
+The workflow requires the exact running release tag, the literal confirmation
+`ROTATE_PRODUCTION_TENANT_OWNER_CREDENTIAL`, an opaque approved change
+reference, and the exact salon UUID. Put the current Tenant Owner email in the
+temporary protected production environment secret
+`TENANT_OWNER_RECOVERY_EMAIL` and a generated replacement password of at least
+20 characters in `TENANT_OWNER_RECOVERY_PASSWORD`.
+
+The reviewed `platform-access rotate-tenant-owner-password` operator executes
+one serializable transaction. It row-locks the exact email/salon ownership
+pair, requires an active `tenant` principal, changes only that user's bcrypt
+password hash, revokes all refresh tokens, and records a replay-safe immutable
+access action/event. Email, identity, `salons.owner_user_id`, memberships,
+roles, status, salon data, scheduling state, provider configuration, and AI
+runtime are not mutated. Password material and email are excluded from the
+operator result, audit payloads, and workflow logs.
+
+The runner and VPS remove their temporary email, password, binary, and result
+files in `always()` cleanup. The approved operator who generated the
+replacement password remains responsible for its handoff: do not discard the
+operator-held copy until the intended recipient has received it and both login
+and logout have been verified. After successful handoff, delete both temporary
+GitHub recovery secrets and the operator-held plaintext files. Rerunning one
+GitHub run reuses its stable action key and exact password fingerprint; a new
+dispatch creates a new action key.
+
 ## Opt-In Sample Test Data
 
 V73 adds only the `live|sample_test` classification contract to `users` and

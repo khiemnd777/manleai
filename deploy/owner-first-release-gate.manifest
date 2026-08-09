@@ -104,6 +104,7 @@ SECURITY_CONTRACT_PACKAGES=(
 SECURITY_CONTRACT_TEST_FILES=(
   deploy/encrypt-platform-admin-credential-handoff-test.sh
   deploy/production-platform-admin-credential-recovery-test.sh
+  deploy/production-tenant-owner-credential-recovery-test.sh
   backend/migrations/v90_safety_test.go
   backend/migrations/v90_integration_test.go
   backend/migrations/v91_safety_test.go
