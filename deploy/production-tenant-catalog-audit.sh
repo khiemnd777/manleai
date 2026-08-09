@@ -136,6 +136,39 @@ category_alias_counts AS (
   FROM service_category_aliases AS alias
   WHERE alias.salon_id = :'target_salon_id'::uuid
 ),
+calendar_state AS (
+  SELECT
+    count(*)::bigint AS calendar_config_rows,
+    COALESCE(max(config.version), 0)::bigint AS calendar_config_version,
+    COALESCE(max(config.activated_version), 0)::bigint AS calendar_activated_version
+  FROM manleai_calendar_configs AS config
+  WHERE config.salon_id = :'target_salon_id'::uuid
+),
+calendar_setup_counts AS (
+  SELECT
+    (
+      SELECT count(*)::bigint
+      FROM salon_business_hour_periods AS period
+      WHERE period.salon_id = :'target_salon_id'::uuid
+        AND period.source = 'local_override'
+    ) AS calendar_local_hour_periods,
+    (
+      SELECT count(*)::bigint
+      FROM manleai_calendar_service_policies AS policy
+      WHERE policy.salon_id = :'target_salon_id'::uuid
+    ) AS calendar_service_policies,
+    (
+      SELECT count(*)::bigint
+      FROM manleai_calendar_service_policies AS policy
+      WHERE policy.salon_id = :'target_salon_id'::uuid
+        AND policy.enabled
+    ) AS calendar_enabled_service_policies,
+    (
+      SELECT count(*)::bigint
+      FROM manleai_calendar_staff_weekly_periods AS period
+      WHERE period.salon_id = :'target_salon_id'::uuid
+    ) AS calendar_staff_periods
+),
 active_platform_admins AS (
   SELECT DISTINCT account.id
   FROM users AS account
@@ -172,6 +205,8 @@ CROSS JOIN catalog_counts AS catalog
 CROSS JOIN category_counts AS categories
 CROSS JOIN service_alias_counts AS service_aliases
 CROSS JOIN category_alias_counts AS category_aliases
+CROSS JOIN calendar_state AS calendar
+CROSS JOIN calendar_setup_counts AS calendar_setup
 CROSS JOIN authorization_counts AS auth_counts
 CROSS JOIN LATERAL (
   VALUES
@@ -195,7 +230,14 @@ CROSS JOIN LATERAL (
     (18, 'active_platform_admin_accounts=' || auth_counts.active_platform_admin_accounts),
     (19, 'platform_admin_services_read_capable_accounts=' || auth_counts.platform_admin_services_read_capable_accounts),
     (20, 'support_services_read_authorized_admin_accounts=' || auth_counts.support_services_read_authorized_admin_accounts),
-    (21, 'actor_feature_services_read_authorized_admin_accounts=' || auth_counts.actor_feature_services_read_authorized_admin_accounts)
+    (21, 'actor_feature_services_read_authorized_admin_accounts=' || auth_counts.actor_feature_services_read_authorized_admin_accounts),
+    (22, 'calendar_config_rows=' || calendar.calendar_config_rows),
+    (23, 'calendar_config_version=' || calendar.calendar_config_version),
+    (24, 'calendar_activated_version=' || calendar.calendar_activated_version),
+    (25, 'calendar_local_hour_periods=' || calendar_setup.calendar_local_hour_periods),
+    (26, 'calendar_service_policies=' || calendar_setup.calendar_service_policies),
+    (27, 'calendar_enabled_service_policies=' || calendar_setup.calendar_enabled_service_policies),
+    (28, 'calendar_staff_periods=' || calendar_setup.calendar_staff_periods)
 ) AS output(ordinal, line)
 ORDER BY output.ordinal;
 
@@ -222,7 +264,14 @@ service_category_aliases_active
 active_platform_admin_accounts
 platform_admin_services_read_capable_accounts
 support_services_read_authorized_admin_accounts
-actor_feature_services_read_authorized_admin_accounts'
+actor_feature_services_read_authorized_admin_accounts
+calendar_config_rows
+calendar_config_version
+calendar_activated_version
+calendar_local_hour_periods
+calendar_service_policies
+calendar_enabled_service_policies
+calendar_staff_periods'
 actual_keys="$(cut -d= -f1 "$audit_output")"
 if [ "$actual_keys" != "$expected_keys" ]; then
   echo "The production tenant catalog audit returned an unexpected output contract." >&2

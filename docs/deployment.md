@@ -408,7 +408,8 @@ healthy ManleAI PostgreSQL container, and runs its fixed query with PostgreSQL
 The workflow reports whether the salon exists, its data classification,
 selected `active_pos_provider` adapter token, scheduling authority, aggregate
 service/category/alias counts, the number of services matching the selected
-provider, and aggregate `platform_admin` results for
+provider, aggregate ManleAI Calendar config/activation/local-hours/service-
+policy/staff-period counts, and aggregate `platform_admin` results for
 `app_platform_admin_capability`, `app_active_support_authorization`, and
 `app_actor_feature_access`. The selected provider token is not evidence that a
 salon-scoped integration configuration is enabled or live-verified; Platform
@@ -433,7 +434,10 @@ gh workflow run production-tenant-catalog-audit.yml \
 
 Inspect the log for the fixed `key=value` output. A nonzero
 `services_total` with a zero `services_matching_active_provider` proves a
-catalog/provider-selection mismatch, not an empty canonical catalog. A
+catalog/provider-selection mismatch, not an empty canonical catalog.
+`calendar_config_rows=1` while the authenticated calendar aggregate reports
+`config_version=0` proves a database visibility/RLS discrepancy; a zero row
+count rules that discrepancy out before a first policy insert is retried. A
 Platform Admin count that passes `app_platform_admin_capability` and
 `app_actor_feature_access` but not `app_active_support_authorization` is the
 expected V76 distinction between direct Admin authority and temporary
