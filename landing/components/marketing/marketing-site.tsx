@@ -203,7 +203,7 @@ export function MarketingSite({ locale }: { locale: Locale }) {
 }
 
 function Brand({ href }: { href: string }) {
-  return <Link className={c("brand")} href={href} aria-label="Tianna AI home"><img src="/brand/tianna-ai-logo-720.png" alt="Tianna AI logo" width="54" height="54" /><span className={c("brand-wordmark")}>Tianna <span>AI</span></span></Link>;
+  return <Link className={c("brand")} href={href} aria-label="Tianna AI home"><img src="/brand/icon-192.png" alt="Tianna AI logo" width="54" height="54" /><span className={c("brand-wordmark")}>Tianna <span>AI</span></span></Link>;
 }
 
 export function LanguageLinks({ locale, pricing = false }: { locale: Locale; pricing?: boolean }) {

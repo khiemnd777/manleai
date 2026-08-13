@@ -49,3 +49,11 @@ test("responsive marketing navigation and pricing keep mobile content in normal 
   assert.match(pricing,/comparison-mobile/);
   assert.ok((pricing.match(/comparisonRows\.map/g)??[]).length>=2);
 });
+
+test("marketing headers use the lightweight brand asset",()=>{
+  const marketing=readFileSync(join(process.cwd(),"components","marketing","marketing-site.tsx"),"utf8");
+  const pricing=readFileSync(join(process.cwd(),"components","marketing","pricing-page.tsx"),"utf8");
+
+  assert.match(marketing,/function Brand[\s\S]*?src="\/brand\/icon-192\.png"/);
+  assert.match(pricing,/<header[\s\S]*?src="\/brand\/icon-192\.png"/);
+});
