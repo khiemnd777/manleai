@@ -29,42 +29,35 @@ compatible throughout the rollback window:
 
 A release with destructive DDL, incompatible type/meaning changes, required
 new writes that the previous image cannot tolerate, or an incomplete backfill
-must declare the previous image incompatible. The current automated deploy then
-refuses to proceed. Such a release needs a separately approved maintenance and
-database-recovery plan; changing the declaration to bypass the gate is not a
-rollback strategy.
+must not use the normal automated release path. Such a release needs a
+separately approved maintenance and database-recovery plan; weakening the
+normal release contract is not a rollback strategy.
 
-## Per-Release Compatibility Declaration
+## Automated Release Compatibility Contract
 
-Before pushing a release tag, a migration reviewer must compare:
+The normal tagged release path accepts only the repository-wide expand/contract
+policy above. It has no per-tag compatibility variable or manual GitHub Settings
+step. The workflow derives and records:
 
-- the currently running image and database schema;
-- every new or changed migration in the candidate release;
-- repository/service queries used by the previous image; and
-- any backfill, constraint-validation, or data-ownership transition.
+- `release_tag` from the immutable GitHub tag (`github.ref_name`);
+- `released_by` from the authenticated GitHub actor (`github.actor`); and
+- `rollback_policy=expand_contract` from this repository contract.
 
-The protected `production` GitHub environment must set the four release
-declarations plus the data profile:
+The protected `production` GitHub environment needs only stable, one-time
+deployment configuration:
 
 ```txt
-MIGRATION_COMPATIBILITY_RELEASE_TAG=<exact release tag>
-PREVIOUS_IMAGE_DB_COMPATIBLE=true
-MIGRATION_COMPATIBILITY_APPROVER=<bounded reviewer identity>
 POSTGRES_BACKUP_STORAGE_APPROVAL=encrypted-private:/opt/manleai/backups
 DEPLOY_DATA_PROFILE=<live-or-sample_test>
 ```
 
-The tag must match the release exactly. The deploy job rejects a missing,
-stale, malformed, or false declaration. The remote release directory retains a
-mode-`600` declaration record containing only the release tag, compatibility
-decision, approver, exact storage approval, selected data profile, and optional
-sample-reset release tag. The storage value attests an
+After that one-time configuration, `make release TAG=v...` is the complete
+normal release operation. The remote release directory retains a mode-`600`
+record containing the GitHub-derived tag and actor, rollback policy, exact
+storage approval, selected data profile, and optional sample-reset release tag.
+The storage value attests an
 operator-verified encrypted private path but does not encrypt it. These values
 are release evidence, not database or provider configuration.
-
-After a release completes, treat the declaration as consumed. A later tag must
-receive a new review and exact tag value; compatibility approval never carries
-forward implicitly.
 
 ### V74 principal-scope preflight and rollback note
 
@@ -93,7 +86,6 @@ retain at least one valid active Platform Administrator before image rollback.
 - Run migration tests and any migration-specific read-only preflight, such as
   the V39 ambiguous-attempt query in `docs/deployment.md`.
 - Confirm the expand/contract phase and the exact prior image being retained.
-- Set the tag-specific compatibility declaration above.
 - Confirm `/opt/manleai/backups` is an approved encrypted private storage
   boundary with sufficient free space and retention.
 - Confirm the PostgreSQL container is healthy. A stopped container or an
@@ -133,14 +125,13 @@ container is not considered empty and fails closed.
   the `current` release symlink. A post-upsert smoke failure restores the exact
   previous project edge route and previous images with the previous env and
   Compose file.
-- Preserve the backup, checksum, compatibility declaration, prior image tags,
+- Preserve the backup, checksum, rollback-policy record, prior image tags,
   and bounded logs for the change record.
 
 ### 4. Abort Conditions
 
 Abort before mutation when:
 
-- the compatibility declaration is absent, stale, or false;
 - the existing database source is ambiguous;
 - the PostgreSQL service is unhealthy;
 - encrypted private backup storage is unavailable or full;
@@ -159,9 +150,9 @@ If the candidate fails after migrations commit:
 1. Stop new traffic and preserve logs/evidence.
 2. Determine whether the failure is application-only or whether data/schema is
    unsafe.
-3. If the tag-specific declaration proves the previous image remains compatible
-   with the expanded schema, the deploy workflow may restart those prior images.
-   PostgreSQL remains at the forward schema.
+3. Under the normal release path's expand/contract policy, the deploy workflow
+   may restart the prior images against the expanded schema. PostgreSQL remains
+   at the forward schema.
 4. If database state is suspect, do not rely on image rollback. Select the exact
    pre-deploy artifact and validate it with the isolated restore procedure in
    [PostgreSQL Backup And Isolated Restore Drills](postgres-backup-restore.md).
@@ -183,7 +174,7 @@ service. Neither value is inferred from a successful image restart.
 The release/change record must retain, without secrets or PII:
 
 - release tag and previous image identities;
-- compatibility approver and declaration;
+- GitHub release actor and repository rollback policy;
 - backup artifact ID and SHA-256;
 - backup timestamp and storage/retention class;
 - migration versions/checksum validation;

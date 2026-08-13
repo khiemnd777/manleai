@@ -144,13 +144,14 @@ alert routing, or on-call readiness. Those remain separate dashboard-backed
 runtime checks and operational approvals.
 
 Every deploy SSH/SCP connection has a 15-second connection timeout and sends
-keepalives during long-running work. Before replacing containers, the release
-requires an exact tag-specific declaration that the previous image is
-compatible with the candidate forward schema, takes and validates a private
-pre-deploy PostgreSQL backup, and tags the currently running application images
-locally. The candidate environment remains inside its release directory; the
-previous release directory retains the exact active env and Compose file used
-for rollback. If API health, data-profile, edge validation/reload, or public
+keepalives during long-running work. The normal release path derives the exact
+release tag from `github.ref_name` and the release actor from `github.actor`; it
+does not require a tag-specific GitHub variable update. Before replacing
+containers, the workflow validates the migration ledger, takes and validates a
+private pre-deploy PostgreSQL backup, and tags the currently running application
+images locally. The candidate environment remains inside its release directory;
+the previous release directory retains the exact active env and Compose file
+used for rollback. If API health, data-profile, edge validation/reload, or public
 domain smoke fails, the workflow restores the previous project edge route and
 those previous images with the previous env/Compose boundary, while keeping the
 previous `/opt/manleai/current` release active. Image rollback does not restore
@@ -218,9 +219,6 @@ commit the private key or production environment file.
 Required variables in the protected `production` GitHub environment:
 
 ```txt
-MIGRATION_COMPATIBILITY_RELEASE_TAG
-PREVIOUS_IMAGE_DB_COMPATIBLE
-MIGRATION_COMPATIBILITY_APPROVER
 POSTGRES_BACKUP_STORAGE_APPROVAL
 DEPLOY_DATA_PROFILE
 ```
@@ -236,15 +234,16 @@ successful release. A mismatched or missing reset tag fails before deletion.
 The `live` profile ignores sample credentials and always refuses automatic
 database reset.
 
-The compatibility tag, decision, and approver are release-specific. The release
-tag must match exactly, compatibility must be the literal `true`, and the
-approver must be a bounded reviewer identity. A prior compatibility declaration
-does not authorize a later tag. Storage approval must be the exact value
+Normal releases require no per-tag variable or Settings change: after the
+protected environment has been configured once, `make release TAG=v...` is the
+only release command. The workflow records the immutable GitHub tag, GitHub
+actor, and repository-owned `expand_contract` rollback policy automatically.
+Storage approval must be the exact value
 `encrypted-private:/opt/manleai/backups` and remains valid only while the path,
 access controls, encryption, retention, and key ownership remain approved. The
-deploy fails before database mutation when the declaration or storage approval
-is missing, stale, malformed, or false. The storage value is an operator
-attestation; it does not encrypt the path.
+deploy fails before database mutation when the storage approval is missing or
+invalid. The storage value is an operator attestation; it does not encrypt the
+path.
 
 ## Database Backup, Restore Drill, And Rollback
 
@@ -262,8 +261,8 @@ the bounded database scripts in `deploy/`:
 Before a non-initial deployment starts the candidate API/migrator, the workflow
 backs up the explicit `POSTGRES_DB` on the existing Compose PostgreSQL service
 to `/opt/manleai/backups/predeploy-<release-id>.dump`. The artifact, checksum,
-compatibility declaration, and backup record use private permissions and must
-live on an approved encrypted volume. If an existing container is stopped, or
+release rollback-policy record, and backup record use private permissions and
+must live on an approved encrypted volume. If an existing container is stopped, or
 the project volume exists without a Compose container, the source is ambiguous
 and deployment stops. Only a truly empty initial deployment with no database
 container and no project volume may record backup as not applicable.

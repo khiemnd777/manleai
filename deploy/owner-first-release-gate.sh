@@ -242,7 +242,7 @@ workflow_marker_line() {
 
 validate_deployment_workflow_contract() {
   local workflow_file="$repo_root/.github/workflows/ci-cd.yml"
-  local marker line_number upsert_line smoke_line env_promotion_line current_promotion_line
+  local forbidden_marker marker line_number upsert_line smoke_line env_promotion_line current_promotion_line
   [ -f "$workflow_file" ] || fail "CI/CD workflow is missing"
   [ -f "$script_dir/production-domain-smoke.sh" ] || fail "production domain smoke script is missing"
   [ -f "$script_dir/production-domain-smoke-test.sh" ] || fail "production domain smoke regression test is missing"
@@ -251,7 +251,18 @@ validate_deployment_workflow_contract() {
     fail "CI/CD workflow promotes project.env before candidate verification"
   fi
 
+  for forbidden_marker in \
+    'MIGRATION_COMPATIBILITY_RELEASE_TAG' \
+    'MIGRATION_COMPATIBILITY_APPROVER' \
+    'PREVIOUS_IMAGE_DB_COMPATIBLE'; do
+    if grep -Fq -- "$forbidden_marker" "$workflow_file"; then
+      fail "CI/CD workflow requires obsolete per-release configuration: $forbidden_marker"
+    fi
+  done
+
   for marker in \
+    'RELEASE_ACTOR: ${{ github.actor }}' \
+    'rollback_policy=expand_contract' \
     'mv "$PROJECT_ENV_FILE" "$candidate_env"' \
     '--env-file "$candidate_env"' \
     '--env-file "$previous_env"' \

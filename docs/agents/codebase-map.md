@@ -311,8 +311,9 @@ triage keyword table.
   `manleai_restore_drill_...` target; and
   `deploy/postgres-verify-restore.sh` owns release migration-checksum parity,
   required schema-object checks, tenant smoke queries, and the isolated API
-  startup handoff. Automatic image rollback requires an exact tag-specific
-  previous-image/database compatibility declaration and never restores the DB.
+  startup handoff. Automatic image rollback follows the repository-owned
+  expand/contract policy, uses GitHub-derived release evidence, and never
+  restores the DB.
 
 ## Backend Module Map
 
@@ -906,11 +907,12 @@ boundary.
 - Read first: `docs/deployment.md`,
   `docs/operations/postgres-backup-restore.md`, and
   `docs/operations/migration-rollback.md`.
-- Tagged deploy owner: `.github/workflows/ci-cd.yml`. It validates the exact
-  release tag, `PREVIOUS_IMAGE_DB_COMPATIBLE=true`, and bounded compatibility
-  approver plus exact protected storage-path approval before mutation; bundles
-  the release migration files; refuses an ambiguous existing PostgreSQL source;
-  and runs the checked pre-deploy backup before candidate API startup migration.
+- Tagged deploy owner: `.github/workflows/ci-cd.yml`. It derives the immutable
+  release tag and actor from the GitHub event with no per-tag Settings update,
+  records the repository-owned `expand_contract` rollback policy, and validates
+  the exact protected storage-path approval before mutation; it bundles the
+  release migration files, refuses an ambiguous existing PostgreSQL source, and
+  runs the checked pre-deploy backup before candidate API startup migration.
 - Backup owner: `deploy/postgres-backup.sh`. Dynamic inputs are the explicit
   Compose/env paths, project, source DB/user, private output directory, and
   artifact ID. Fixed guards are custom-format `pg_dump`, `pg_restore --list`,

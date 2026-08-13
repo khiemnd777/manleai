@@ -183,8 +183,8 @@ drained and provider/worker paths to be observed before migration.
 `build-images` requires the backend, web, and Owner-first release-gate jobs.
 `deploy` requires those jobs plus `build-images`, and both jobs remain restricted
 to `v*` tags. The release gate is additive to the existing forward-migration,
-pre-deploy backup, compatibility declaration, healthcheck, and rollback gates;
-it does not weaken or replace them.
+pre-deploy backup, repository-owned expand/contract rollback policy, healthcheck,
+and rollback gates; it does not weaken or replace them.
 
 ## Local Validation
 

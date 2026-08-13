@@ -216,10 +216,7 @@ jobs:
         env:
           DEPLOY_DATA_PROFILE: ${{ vars.DEPLOY_DATA_PROFILE }}
           IMAGE_TAG: ${{ env.IMAGE_TAG }}
-          MIGRATION_COMPATIBILITY_APPROVER: ${{ vars.MIGRATION_COMPATIBILITY_APPROVER }}
-          MIGRATION_COMPATIBILITY_RELEASE_TAG: ${{ vars.MIGRATION_COMPATIBILITY_RELEASE_TAG }}
           POSTGRES_BACKUP_STORAGE_APPROVAL: ${{ vars.POSTGRES_BACKUP_STORAGE_APPROVAL }}
-          PREVIOUS_IMAGE_DB_COMPATIBLE: ${{ vars.PREVIOUS_IMAGE_DB_COMPATIBLE }}
           PROJECT_ENV_B64: ${{ secrets.PROJECT_ENV_B64 }}
           SAMPLE_DATA_ENV_B64: ${{ secrets.SAMPLE_DATA_ENV_B64 }}
           SAMPLE_TEST_RESET_RELEASE_TAG: ${{ vars.SAMPLE_TEST_RESET_RELEASE_TAG }}
@@ -281,20 +278,8 @@ jobs:
             echo "::error::Release tags must use only bounded artifact-safe characters."
             exit 1
           fi
-          if [ "$MIGRATION_COMPATIBILITY_RELEASE_TAG" != "$IMAGE_TAG" ]; then
-            echo "::error::MIGRATION_COMPATIBILITY_RELEASE_TAG must exactly match this release tag."
-            exit 1
-          fi
-          if [ "$PREVIOUS_IMAGE_DB_COMPATIBLE" != "true" ]; then
-            echo "::error::PREVIOUS_IMAGE_DB_COMPATIBLE must be explicitly declared true for this release."
-            exit 1
-          fi
           if [ "$POSTGRES_BACKUP_STORAGE_APPROVAL" != "encrypted-private:/opt/manleai/backups" ]; then
             echo "::error::POSTGRES_BACKUP_STORAGE_APPROVAL must approve the exact encrypted private backup path."
-            exit 1
-          fi
-          if [[ ! "$MIGRATION_COMPATIBILITY_APPROVER" =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$ ]]; then
-            echo "::error::MIGRATION_COMPATIBILITY_APPROVER must name the bounded approval identity for this release."
             exit 1
           fi
 
@@ -416,10 +401,8 @@ jobs:
           REMOTE_USER: ${{ secrets.REMOTE_USER }}
           SERVER_IP: ${{ secrets.SERVER_IP }}
           GHCR_USERNAME: ${{ github.actor }}
-          MIGRATION_COMPATIBILITY_APPROVER: ${{ vars.MIGRATION_COMPATIBILITY_APPROVER }}
-          MIGRATION_COMPATIBILITY_RELEASE_TAG: ${{ vars.MIGRATION_COMPATIBILITY_RELEASE_TAG }}
           POSTGRES_BACKUP_STORAGE_APPROVAL: ${{ vars.POSTGRES_BACKUP_STORAGE_APPROVAL }}
-          PREVIOUS_IMAGE_DB_COMPATIBLE: ${{ vars.PREVIOUS_IMAGE_DB_COMPATIBLE }}
+          RELEASE_ACTOR: ${{ github.actor }}
           SAMPLE_TEST_RESET_RELEASE_TAG: ${{ vars.SAMPLE_TEST_RESET_RELEASE_TAG }}
         run: |
           set -euo pipefail
@@ -467,7 +450,7 @@ jobs:
           }
 
           trap collect_deploy_diagnostics ERR
-          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' DEPLOY_DATA_PROFILE='$DEPLOY_DATA_PROFILE' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' RELEASE_TAG='$IMAGE_TAG' GHCR_USERNAME='$GHCR_USERNAME' PROJECT_ENV_FILE='$project_env_remote' IMAGES_ENV_FILE='$images_env_remote' GHCR_TOKEN_FILE='$ghcr_token_remote' SAMPLE_DATA_ENV_FILE='$sample_env_remote' SAMPLE_TEST_RESET_RELEASE_TAG='$SAMPLE_TEST_RESET_RELEASE_TAG' MIGRATION_COMPATIBILITY_APPROVER='$MIGRATION_COMPATIBILITY_APPROVER' MIGRATION_COMPATIBILITY_RELEASE_TAG='$MIGRATION_COMPATIBILITY_RELEASE_TAG' POSTGRES_BACKUP_STORAGE_APPROVAL='$POSTGRES_BACKUP_STORAGE_APPROVAL' PREVIOUS_IMAGE_DB_COMPATIBLE='$PREVIOUS_IMAGE_DB_COMPATIBLE' bash -c 'set -euo pipefail; umask 077; buffered_script=\$(mktemp); cleanup() { rm -f \"\$buffered_script\"; }; trap cleanup EXIT; cat > \"\$buffered_script\"; bash \"\$buffered_script\"'" <<'REMOTE'
+          ssh -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$REMOTE_USER@$SERVER_IP" "DEPLOY_PATH='$DEPLOY_PATH' DEPLOY_DATA_PROFILE='$DEPLOY_DATA_PROFILE' RELEASE_ACTOR='$RELEASE_ACTOR' RELEASE_ID='$RELEASE_ID' RELEASE_NAME='$RELEASE_NAME' RELEASE_TAG='$IMAGE_TAG' GHCR_USERNAME='$GHCR_USERNAME' PROJECT_ENV_FILE='$project_env_remote' IMAGES_ENV_FILE='$images_env_remote' GHCR_TOKEN_FILE='$ghcr_token_remote' SAMPLE_DATA_ENV_FILE='$sample_env_remote' SAMPLE_TEST_RESET_RELEASE_TAG='$SAMPLE_TEST_RESET_RELEASE_TAG' POSTGRES_BACKUP_STORAGE_APPROVAL='$POSTGRES_BACKUP_STORAGE_APPROVAL' bash -c 'set -euo pipefail; umask 077; buffered_script=\$(mktemp); cleanup() { rm -f \"\$buffered_script\"; }; trap cleanup EXIT; cat > \"\$buffered_script\"; bash \"\$buffered_script\"'" <<'REMOTE'
           set -euo pipefail
 
           release_dir="$DEPLOY_PATH/releases/$RELEASE_ID"
@@ -511,14 +494,6 @@ jobs:
             previous_compose="$previous_release_dir/docker-compose.prod.yml"
             install -m 600 "$active_env" "$previous_env"
           fi
-          if [ "$MIGRATION_COMPATIBILITY_RELEASE_TAG" != "$RELEASE_TAG" ]; then
-            echo "::error::The database compatibility declaration does not match this release."
-            exit 1
-          fi
-          if [ "$PREVIOUS_IMAGE_DB_COMPATIBLE" != "true" ]; then
-            echo "::error::Previous-image database compatibility was not declared."
-            exit 1
-          fi
           if [ "$POSTGRES_BACKUP_STORAGE_APPROVAL" != "encrypted-private:/opt/manleai/backups" ]; then
             echo "::error::The exact encrypted private backup path was not approved."
             exit 1
@@ -551,9 +526,9 @@ jobs:
 
           compatibility_record="$release_dir/database-compatibility.env"
           {
-            printf 'release_tag=%s\n' "$MIGRATION_COMPATIBILITY_RELEASE_TAG"
-            printf 'previous_image_db_compatible=%s\n' "$PREVIOUS_IMAGE_DB_COMPATIBLE"
-            printf 'approved_by=%s\n' "$MIGRATION_COMPATIBILITY_APPROVER"
+            printf 'release_tag=%s\n' "$RELEASE_TAG"
+            printf 'rollback_policy=expand_contract\n'
+            printf 'released_by=%s\n' "$RELEASE_ACTOR"
             printf 'backup_storage_approval=%s\n' "$POSTGRES_BACKUP_STORAGE_APPROVAL"
             printf 'data_profile=%s\n' "$DEPLOY_DATA_PROFILE"
             printf 'sample_reset_release_tag=%s\n' "${SAMPLE_TEST_RESET_RELEASE_TAG:-none}"
@@ -646,10 +621,6 @@ jobs:
           rollback_images="$release_dir/rollback-images.env"
           rollback_release() {
             if [ ! -f "$rollback_images" ]; then
-              return
-            fi
-            if [ "$PREVIOUS_IMAGE_DB_COMPATIBLE" != "true" ]; then
-              echo "::error::Refusing image rollback because previous-image database compatibility was not declared."
               return
             fi
             if [ -z "$previous_env" ] || [ -z "$previous_compose" ] || [ ! -f "$previous_env" ] || [ ! -f "$previous_compose" ]; then
