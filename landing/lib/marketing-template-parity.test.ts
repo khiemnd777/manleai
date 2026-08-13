@@ -5,12 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 
 const expectedAssetHashes = {
-  "apple-touch-icon.png": "bc219f5ec28359a8d3f1b47cd62ad6c8b07bf7ccb91a0c4722c89ff9867b3149",
-  "favicon-32.png": "884f41f6893a2e0f10b0ef298d4226b5be6b289f467a5a9a748c3db271e7e72a",
-  "icon-192.png": "fcd4a4be3cf4b6838cb0742755bc560b8d8bfa3c0230c4cfd48f861b7b4175aa",
-  "icon-512.png": "de8d4a17498c8781bfacc8dc2045fb46a6af922ee22333ba90b623eb7bbb2efc",
-  "manle-ai-logo-720.png": "083191af9bba51437d7d1309037a4e26c787e06c2d79af0ee567faaf11cce297",
-  "manle-ai-logo.png": "c44579e7ca7525cb643418defef9fbfa2bb68cbd9c45bd51ffd5fa2be5ca1182"
+  "apple-touch-icon.png": "2c52469fe6b8628eb6f6f6cddce9da5c371cd17410725e14d7578df176610f47",
+  "favicon-32.png": "d8523af8fe1dbe687b4cc3500537c2a9eb564008e6ff76b2b035fdf0867175ee",
+  "icon-192.png": "7445183d3133aa86f718256d70825d01bbb8225bfd76e6d642b62ca779052baf",
+  "icon-512.png": "26de3011a45853ba0a5beede21c85fc06a953f9305407fa868c3ca9c090cb969",
+  "tianna-ai-logo-720.png": "5ac065c87f3eddd2be5190bbd74d6e5f7e19b943d71f033be5587fdbfecc8591",
+  "tianna-ai-logo.png": "a146da0a3365ee81c0d29c0784b129cdf9e916aaf30b017a251720eaa96df28d"
 } as const;
 
 test("marketing brand assets retain the approved template bytes",()=>{

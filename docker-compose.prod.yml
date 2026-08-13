@@ -1,6 +1,7 @@
 name: ${COMPOSE_PROJECT_NAME:-manleai}
 
 x-backend-runtime-environment: &backend_runtime_environment
+  DEPLOYMENT_ENV: production
   APP_ENV: production
   DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must use the non-owner runtime role}
   DATABASE_RUNTIME_ROLE: ${DATABASE_RUNTIME_ROLE:?DATABASE_RUNTIME_ROLE is required}

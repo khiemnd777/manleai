@@ -53,6 +53,9 @@ import (
 func main() {
 	ctx := context.Background()
 	cfg := config.Load()
+	if err := cfg.ValidateEnvironment(); err != nil {
+		log.Fatalf("validate runtime environment: %v", err)
+	}
 	logg := logger.New(cfg.AppEnv)
 
 	db, err := database.OpenApplication(
@@ -67,7 +70,7 @@ func main() {
 		log.Fatalf("prepare application database: %v", err)
 	}
 	defer db.Close()
-	logg.Info("database ready", "rls_enforced", cfg.DatabaseRLSEnforced)
+	logg.Info("database ready", "deployment_env", cfg.DeploymentEnv, "app_env", cfg.AppEnv, "rls_enforced", cfg.DatabaseRLSEnforced)
 
 	cipher, err := encryption.NewTokenCipher(cfg.EncryptionKey)
 	if err != nil {
@@ -254,7 +257,7 @@ func main() {
 	schedulingBehaviorService := schedulingbehavior.NewService(schedulingbehavior.NewRepository(db))
 	schedulingbehavior.RegisterPlatformRoutes(api, schedulingbehavior.NewPlatformHandler(schedulingBehaviorService, accessService), cfg.JWTSecret)
 
-	logg.Info("api listening", "port", cfg.ServerPort, "env", cfg.AppEnv)
+	logg.Info("api listening", "port", cfg.ServerPort, "deployment_env", cfg.DeploymentEnv, "app_env", cfg.AppEnv)
 	if err := app.Listen(":" + cfg.ServerPort); err != nil {
 		log.Fatalf("listen: %v", err)
 	}

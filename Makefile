@@ -5,7 +5,7 @@ LOG_TAIL ?= 200
 RELEASE_BRANCH ?= main
 TAG_MESSAGE ?= Release $(TAG)
 
-.PHONY: up down restart log build run release
+.PHONY: up down restart restart-prod-sim test-backend-integration log build run release
 
 up:
 	$(MAKE) down
@@ -14,6 +14,12 @@ up:
 
 restart:
 	bash deploy/local-restart.sh
+
+restart-prod-sim:
+	APP_ENV=production bash deploy/local-restart.sh
+
+test-backend-integration:
+	bash deploy/local-backend-integration-test.sh
 
 down:
 	$(COMPOSE) down --remove-orphans

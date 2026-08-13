@@ -112,15 +112,15 @@ export function MarketingSite({ locale }: { locale: Locale }) {
               <p className={c("hero-safety-note")}>{content.hero.note}</p>
             </div>
 
-            <div className={c("hero-visual", "reveal", "reveal-delay-1")} data-reveal aria-label="ManleAI product illustration">
+            <div className={c("hero-visual", "reveal", "reveal-delay-1")} data-reveal aria-label="Tianna AI product illustration">
               <div className={c("sticker", "sticker-top")}><span>24/7</span><small>{content.hero.alwaysOn}</small></div>
               <div className={c("sticker", "sticker-right")}><span>ENGLISH</span><small>{content.hero.callLanguage}</small></div>
               <div className={c("logo-stage")}>
                 <div className={c("spark", "spark-one")} aria-hidden="true">✦</div>
                 <div className={c("spark", "spark-two")} aria-hidden="true">✦</div>
-                <img className={c("hero-logo")} src="/brand/manle-ai-logo-720.png" alt="ManleAI nail salon receptionist" width="620" height="620" />
+                <img className={c("hero-logo")} src="/brand/tianna-ai-logo-720.png" alt="Tianna AI nail salon receptionist" width="620" height="620" />
                 <div className={c("floating-call")}>
-                  <div className={c("caller-avatar")}>M</div>
+                  <div className={c("caller-avatar")}>T</div>
                   <div><strong>{content.hero.incomingCall}</strong><span>{content.hero.newCustomer}</span></div>
                   <div className={c("call-equalizer")} aria-hidden="true"><i /><i /><i /><i /></div>
                 </div>
@@ -170,7 +170,7 @@ export function MarketingSite({ locale }: { locale: Locale }) {
           <div className={c("container", "demo-grid")}>
             <div className={c("phone-shell", "reveal")} data-reveal aria-label={locale === "vi" ? "Hội thoại AI mẫu" : "Sample AI receptionist conversation"}>
               <div className={c("phone-topbar")}><span>9:41</span><span className={c("phone-island")} /><span>●●●</span></div>
-              <div className={c("call-header")}><div className={c("caller-logo")}><img src="/brand/manle-ai-logo-720.png" alt="" /></div><span>{content.simulation.salon}</span><strong>{content.simulation.role}</strong><small className={c("call-status")}><i /><span>{content.simulation.live}</span> · <span>{timer}</span></small></div>
+              <div className={c("call-header")}><div className={c("caller-logo")}><img src="/brand/tianna-ai-logo-720.png" alt="" /></div><span>{content.simulation.salon}</span><strong>{content.simulation.role}</strong><small className={c("call-status")}><i /><span>{content.simulation.live}</span> · <span>{timer}</span></small></div>
               <div className={c("transcript")} aria-live="polite">{content.simulation.lines.slice(0, visibleMessages).map((line, index) => <div key={`${line.label}-${index}`} className={c("message", line.role)}><small>{line.label}</small><span>{line.text}</span></div>)}</div>
               <div className={c("call-wave")} aria-hidden="true">{Array.from({ length: 12 }, (_, index) => <i key={index} />)}</div>
               <div className={c("call-controls")} aria-hidden="true"><span><AudioIcon /></span><span className={c("hangup")}><HangupIcon /></span><span><SpeakerIcon /></span></div>
@@ -184,7 +184,7 @@ export function MarketingSite({ locale }: { locale: Locale }) {
         </section>
 
         <section className={c("section", "integrations-section")}>
-          <div className={c("container", "integration-card", "reveal")} data-reveal><div><span className={c("kicker")}>{content.integration.kicker}</span><h2>{content.integration.title}<br /><span>{content.integration.titleAccent}</span></h2><p>{content.integration.body}</p><button className={c("button", "button-primary", "button-large")} type="button" onClick={(event) => openRequest(event.currentTarget)}>{content.integration.cta}<ArrowIcon /></button></div><div className={c("integration-map")} aria-label={locale === "vi" ? "Nhóm tích hợp" : "Integration categories"}><div className={c("integration-center")}><img src="/brand/manle-ai-logo-720.png" alt="ManleAI" /></div><IntegrationNode className="node-calendar" icon="calendar" label={content.integration.categories.calendar} /><IntegrationNode className="node-pos" icon="pos" label="POS" /><IntegrationNode className="node-sms" icon="message" label={content.integration.categories.messaging} /><IntegrationNode className="node-team" icon="team" label={content.integration.categories.team} /></div></div>
+          <div className={c("container", "integration-card", "reveal")} data-reveal><div><span className={c("kicker")}>{content.integration.kicker}</span><h2>{content.integration.title}<br /><span>{content.integration.titleAccent}</span></h2><p>{content.integration.body}</p><button className={c("button", "button-primary", "button-large")} type="button" onClick={(event) => openRequest(event.currentTarget)}>{content.integration.cta}<ArrowIcon /></button></div><div className={c("integration-map")} aria-label={locale === "vi" ? "Nhóm tích hợp" : "Integration categories"}><div className={c("integration-center")}><img src="/brand/tianna-ai-logo-720.png" alt="Tianna AI" /></div><IntegrationNode className="node-calendar" icon="calendar" label={content.integration.categories.calendar} /><IntegrationNode className="node-pos" icon="pos" label="POS" /><IntegrationNode className="node-sms" icon="message" label={content.integration.categories.messaging} /><IntegrationNode className="node-team" icon="team" label={content.integration.categories.team} /></div></div>
         </section>
 
         <section className={c("section", "faq-section")} id="faq">
@@ -192,7 +192,7 @@ export function MarketingSite({ locale }: { locale: Locale }) {
         </section>
 
         <section className={c("section", "final-cta-section")}>
-          <div className={c("container", "final-cta", "reveal")} data-reveal><div className={c("final-cta-stars")} aria-hidden="true">✦ ✦ ✦</div><img src="/brand/manle-ai-logo-720.png" alt="ManleAI" /><span className={c("kicker", "light")}>{content.final.kicker}</span><h2>{content.final.title}<br /><span>{content.final.titleAccent}</span></h2><p>{content.final.body}</p><button className={c("button", "button-white", "button-large")} type="button" onClick={(event) => openRequest(event.currentTarget)}>{content.final.cta}<ArrowIcon /></button></div>
+          <div className={c("container", "final-cta", "reveal")} data-reveal><div className={c("final-cta-stars")} aria-hidden="true">✦ ✦ ✦</div><img src="/brand/tianna-ai-logo-720.png" alt="Tianna AI" /><span className={c("kicker", "light")}>{content.final.kicker}</span><h2>{content.final.title}<br /><span>{content.final.titleAccent}</span></h2><p>{content.final.body}</p><button className={c("button", "button-white", "button-large")} type="button" onClick={(event) => openRequest(event.currentTarget)}>{content.final.cta}<ArrowIcon /></button></div>
         </section>
       </main>
 
@@ -203,7 +203,7 @@ export function MarketingSite({ locale }: { locale: Locale }) {
 }
 
 function Brand({ href }: { href: string }) {
-  return <Link className={c("brand")} href={href} aria-label="ManleAI home"><img src="/brand/manle-ai-logo-720.png" alt="ManleAI logo" width="54" height="54" /><span className={c("brand-wordmark")}>Manle<span>.ai</span></span></Link>;
+  return <Link className={c("brand")} href={href} aria-label="Tianna AI home"><img src="/brand/tianna-ai-logo-720.png" alt="Tianna AI logo" width="54" height="54" /><span className={c("brand-wordmark")}>Tianna <span>AI</span></span></Link>;
 }
 
 export function LanguageLinks({ locale, pricing = false }: { locale: Locale; pricing?: boolean }) {
@@ -213,7 +213,7 @@ export function LanguageLinks({ locale, pricing = false }: { locale: Locale; pri
 export function MarketingFooter({ locale, onRequest }: { locale: Locale; onRequest?: (trigger: HTMLElement) => void }) {
   const content = contentFor(locale);
   const prefix = locale === "vi" ? "/vi" : "";
-  return <footer className={c("site-footer")}><div className={c("container", "footer-grid")}><div><Brand href={prefix || "/"} /><p>{content.footer.text}</p></div><div className={c("footer-links")}><a href={`${prefix || "/"}#why`}>{content.nav.why}</a><a href={`${prefix || "/"}#features`}>{content.nav.features}</a><a href={`${prefix || "/"}#workflow`}>{content.nav.workflow}</a><Link href={`${prefix}/pricing`}>{content.nav.pricing}</Link><a href={`${prefix || "/"}#faq`}>{content.nav.faq}</a></div><div className={c("footer-contact")}><strong>{content.footer.ready}</strong>{onRequest ? <button type="button" onClick={(event) => onRequest(event.currentTarget)}>{content.nav.request}</button> : <Link href={`${prefix || "/"}#top`}>{content.nav.request}</Link>}</div></div><div className={c("container", "footer-bottom")}><span>© {new Date().getFullYear()} ManleAI. {content.footer.rights}</span><div className={c("footer-meta")}><span>{content.footer.note}</span><a className={c("powered-by")} href="https://www.knasoftware.com" target="_blank" rel="noopener">POWERED BY KNASOFTWARE</a></div></div></footer>;
+  return <footer className={c("site-footer")}><div className={c("container", "footer-grid")}><div><Brand href={prefix || "/"} /><p>{content.footer.text}</p></div><div className={c("footer-links")}><a href={`${prefix || "/"}#why`}>{content.nav.why}</a><a href={`${prefix || "/"}#features`}>{content.nav.features}</a><a href={`${prefix || "/"}#workflow`}>{content.nav.workflow}</a><Link href={`${prefix}/pricing`}>{content.nav.pricing}</Link><a href={`${prefix || "/"}#faq`}>{content.nav.faq}</a></div><div className={c("footer-contact")}><strong>{content.footer.ready}</strong>{onRequest ? <button type="button" onClick={(event) => onRequest(event.currentTarget)}>{content.nav.request}</button> : <Link href={`${prefix || "/"}#top`}>{content.nav.request}</Link>}</div></div><div className={c("container", "footer-bottom")}><span>© {new Date().getFullYear()} Tianna AI. {content.footer.rights}</span><div className={c("footer-meta")}><span>{content.footer.note}</span><a className={c("powered-by")} href="https://www.knasoftware.com" target="_blank" rel="noopener">POWERED BY KNASOFTWARE</a></div></div></footer>;
 }
 
 function ArrowIcon() { return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6" /></svg>; }

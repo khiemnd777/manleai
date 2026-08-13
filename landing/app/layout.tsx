@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   metadataBase: new URL(marketingBaseUrl),
-  title: { default: "ManleAI — AI Receptionist for Nail Salons", template: "%s | ManleAI" },
+  title: { default: "Tianna AI — AI Receptionist for Nail Salons", template: "%s | Tianna AI" },
   description: "English AI phone receptionist and owner-first call workflows for US nail salons.",
   icons: {
     icon: [
@@ -19,9 +19,9 @@ export const metadata: Metadata = {
   },
   openGraph: {
     type: "website",
-    title: "ManleAI — AI Receptionist for Nail Salons",
+    title: "Tianna AI — AI Receptionist for Nail Salons",
     description: "English AI phone receptionist and owner-first call workflows for US nail salons.",
-    images: [{ url: "/brand/manle-ai-logo.png", width: 1024, height: 1024, alt: "ManleAI" }]
+    images: [{ url: "/brand/tianna-ai-logo.png", width: 1024, height: 1024, alt: "Tianna AI" }]
   }
 };
 

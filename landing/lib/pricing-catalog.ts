@@ -62,7 +62,7 @@ export const pricingPlans: readonly PricingPlan[] = [
         "AI phone coverage after launch setup is completed.",
         "English call handling.",
         "Answers based on approved salon services, pricing, hours and policies.",
-        "ManleAI Calendar included.",
+        "Tianna AI Calendar included.",
         "Appointment booking, rescheduling and cancellation after calendar setup is completed.",
         "Call transcripts and summaries.",
         "One salon location."
@@ -71,15 +71,15 @@ export const pricingPlans: readonly PricingPlan[] = [
         "Tiếp nhận cuộc gọi bằng AI sau khi hoàn tất thiết lập ra mắt.",
         "Xử lý cuộc gọi bằng tiếng Anh.",
         "Trả lời dựa trên dịch vụ, giá, giờ làm việc và chính sách đã được tiệm duyệt.",
-        "Bao gồm ManleAI Calendar.",
+        "Bao gồm Tianna AI Calendar.",
         "Đặt, đổi và hủy lịch hẹn sau khi hoàn tất thiết lập lịch.",
         "Transcript và tóm tắt cuộc gọi.",
         "Một địa điểm salon."
       ]
     },
     disclaimer: {
-      en: "New accounts begin in request-only mode. ManleAI Calendar appointment actions become available after calendar setup is completed, reviewed and activated. Usage is measured in connected AI voice conversation minutes.",
-      vi: "Tài khoản mới bắt đầu ở chế độ chỉ ghi nhận yêu cầu. Các thao tác lịch hẹn trên ManleAI Calendar được mở sau khi cấu hình lịch hoàn tất, được review và kích hoạt. Usage được tính theo số phút hội thoại AI voice đã kết nối."
+      en: "New accounts begin in request-only mode. Tianna AI Calendar appointment actions become available after calendar setup is completed, reviewed and activated. Usage is measured in connected AI voice conversation minutes.",
+      vi: "Tài khoản mới bắt đầu ở chế độ chỉ ghi nhận yêu cầu. Các thao tác lịch hẹn trên Tianna AI Calendar được mở sau khi cấu hình lịch hoàn tất, được review và kích hoạt. Usage được tính theo số phút hội thoại AI voice đã kết nối."
     },
     recommended: false
   },
@@ -179,7 +179,7 @@ export const pricingSupplement: Record<Locale, PricingSupplement> = {
       items: [
         { title: "Connected AI voice minutes", body: "Usage is measured while the AI voice conversation is connected. The listed monthly allowance is not a count of calls or appointments." },
         { title: "Additional minutes", body: "Starter and Growth list a per-minute amount above the included allowance. Custom allowance and overage terms are set in the signed quote." },
-        { title: "Initial setup — paid once", body: "This separate onboarding fee covers the agreed launch scope: salon profile, services, staff, business hours, AI receptionist call flow, ManleAI Calendar booking rules and launch-readiness review. It is paid once, not every month. Third-party charges and separately quoted integrations are not included." }
+        { title: "Initial setup — paid once", body: "This separate onboarding fee covers the agreed launch scope: salon profile, services, staff, business hours, AI receptionist call flow, Tianna AI Calendar booking rules and launch-readiness review. It is paid once, not every month. Third-party charges and separately quoted integrations are not included." }
       ]
     },
     faq: {
@@ -187,7 +187,7 @@ export const pricingSupplement: Record<Locale, PricingSupplement> = {
       title: "A few useful details before requesting a demo.",
       items: [
         { question: "Can I purchase a plan on this website?", answer: "No. This website sends a demo and setup request to our Operations team for review. It does not collect payment or start a subscription." },
-        { question: "When does automatic appointment booking become available?", answer: "New accounts begin in request-only mode. ManleAI Calendar appointment actions become available after its setup is completed, reviewed and activated. Square Appointments also requires its own completed connection and booking setup." },
+        { question: "When does automatic appointment booking become available?", answer: "New accounts begin in request-only mode. Tianna AI Calendar appointment actions become available after its setup is completed, reviewed and activated. Square Appointments also requires its own completed connection and booking setup." },
         { question: "What happens when usage exceeds the allowance?", answer: "Starter and Growth show the additional per-minute amount in the current pricing catalog. Invoicing, taxes and other commercial terms are governed by the signed agreement, not by submitting this form." },
         { question: "Does Custom guarantee any POS integration?", answer: "No. Custom can include evaluation of separately scoped integrations, but it does not guarantee an unsupported POS or provider." }
       ]
@@ -213,7 +213,7 @@ export const pricingSupplement: Record<Locale, PricingSupplement> = {
       items: [
         { title: "Phút hội thoại AI voice đã kết nối", body: "Usage được tính trong thời gian hội thoại AI voice đang kết nối. Hạn mức hàng tháng không phải số cuộc gọi hoặc số lịch hẹn." },
         { title: "Phút sử dụng bổ sung", body: "Starter và Growth công bố mức phí theo phút vượt hạn mức. Hạn mức và phí vượt mức của Custom được xác định trong báo giá đã ký." },
-        { title: "Thiết lập ban đầu — trả một lần", body: "Khoản onboarding riêng này bao gồm phạm vi ra mắt đã thống nhất: hồ sơ salon, dịch vụ, nhân viên, giờ làm việc, call flow của AI lễ tân, quy tắc booking trên ManleAI Calendar và review mức độ sẵn sàng trước khi ra mắt. Khoản này chỉ trả một lần, không thu mỗi tháng. Chi phí bên thứ ba và integration có báo giá riêng không được bao gồm." }
+        { title: "Thiết lập ban đầu — trả một lần", body: "Khoản onboarding riêng này bao gồm phạm vi ra mắt đã thống nhất: hồ sơ salon, dịch vụ, nhân viên, giờ làm việc, call flow của AI lễ tân, quy tắc booking trên Tianna AI Calendar và review mức độ sẵn sàng trước khi ra mắt. Khoản này chỉ trả một lần, không thu mỗi tháng. Chi phí bên thứ ba và integration có báo giá riêng không được bao gồm." }
       ]
     },
     faq: {
@@ -221,7 +221,7 @@ export const pricingSupplement: Record<Locale, PricingSupplement> = {
       title: "Một số thông tin cần biết trước khi yêu cầu demo.",
       items: [
         { question: "Có thể mua gói trực tiếp trên website không?", answer: "Không. Website gửi yêu cầu demo và thiết lập đến đội ngũ Operations để review. Website không thu tiền hoặc tự bắt đầu subscription." },
-        { question: "Khi nào tính năng tự động đặt lịch được mở?", answer: "Tài khoản mới bắt đầu ở chế độ chỉ ghi nhận yêu cầu. Các thao tác lịch hẹn trên ManleAI Calendar được mở sau khi hoàn tất thiết lập, review và kích hoạt. Square Appointments cũng cần hoàn tất kết nối và thiết lập booking riêng." },
+        { question: "Khi nào tính năng tự động đặt lịch được mở?", answer: "Tài khoản mới bắt đầu ở chế độ chỉ ghi nhận yêu cầu. Các thao tác lịch hẹn trên Tianna AI Calendar được mở sau khi hoàn tất thiết lập, review và kích hoạt. Square Appointments cũng cần hoàn tất kết nối và thiết lập booking riêng." },
         { question: "Điều gì xảy ra khi usage vượt hạn mức?", answer: "Starter và Growth công bố phí bổ sung theo phút trong pricing catalog hiện tại. Cách lập hóa đơn, thuế và các điều khoản thương mại khác được điều chỉnh bởi thỏa thuận đã ký, không phải bởi việc gửi form." },
         { question: "Custom có đảm bảo tích hợp với mọi POS không?", answer: "Không. Custom có thể bao gồm việc đánh giá integration theo scope riêng, nhưng không đảm bảo một POS hoặc provider chưa được hỗ trợ." }
       ]

@@ -212,6 +212,9 @@ func runRotateTenantOwnerPassword(ctx context.Context, args []string) error {
 
 func openAccessRepository(ctx context.Context) (*sql.DB, *access.Repository, error) {
 	cfg := config.Load()
+	if err := cfg.ValidateEnvironment(); err != nil {
+		return nil, nil, err
+	}
 	databaseURL := cfg.MigrationDatabaseURL
 	if databaseURL == "" {
 		databaseURL = cfg.DatabaseURL

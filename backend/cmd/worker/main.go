@@ -58,6 +58,9 @@ func main() {
 	defer stop()
 
 	cfg := config.Load()
+	if err := cfg.ValidateEnvironment(); err != nil {
+		log.Fatalf("validate runtime environment: %v", err)
+	}
 	logg := logger.New(cfg.AppEnv)
 
 	db, err := database.OpenApplication(
@@ -72,7 +75,7 @@ func main() {
 		log.Fatalf("prepare application database: %v", err)
 	}
 	defer db.Close()
-	logg.Info("database ready", "rls_enforced", cfg.DatabaseRLSEnforced)
+	logg.Info("database ready", "deployment_env", cfg.DeploymentEnv, "app_env", cfg.AppEnv, "rls_enforced", cfg.DatabaseRLSEnforced)
 
 	cipher, err := encryption.NewTokenCipher(cfg.EncryptionKey)
 	if err != nil {

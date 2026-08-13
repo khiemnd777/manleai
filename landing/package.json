@@ -6,7 +6,7 @@
     "dev": "next dev -p 3090",
     "build": "next build",
     "typecheck": "tsc --noEmit",
-    "test:security": "node ../deploy/run-ts-evidence-tests.mjs lib/security/content-security-policy.test.ts lib/host-routing.test.ts lib/pricing-catalog.test.ts lib/marketing-content.test.ts lib/marketing-template-parity.test.ts lib/registration-contract.test.ts"
+    "test:security": "node ../deploy/run-ts-evidence-tests.mjs lib/security/content-security-policy.test.ts lib/host-routing.test.ts lib/http-origin.test.ts lib/api-config.test.ts lib/pricing-catalog.test.ts lib/marketing-content.test.ts lib/marketing-template-parity.test.ts lib/registration-contract.test.ts"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

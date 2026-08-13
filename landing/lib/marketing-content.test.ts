@@ -40,3 +40,11 @@ test("marketing copy preserves request-only and conditional-confirmation boundar
   assert.match(marketingContent.vi.hero.note,/chờ chủ tiệm review/i);
   assert.match(marketingContent.vi.faq.items.map(({question,answer})=>`${question} ${answer}`).join(" "),/evidence bền vững/i);
 });
+
+test("customer-facing marketing copy consistently uses the Tianna AI brand",()=>{
+  for(const locale of ["en","vi"] as const){
+    const serialized=JSON.stringify(marketingContent[locale]);
+    assert.match(serialized,/Tianna AI/);
+    assert.doesNotMatch(serialized,/Manle(?:\.ai|AI)?/i);
+  }
+});

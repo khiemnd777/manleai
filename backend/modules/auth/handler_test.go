@@ -73,6 +73,7 @@ func TestBrowserSessionHandlersKeepRefreshTokenInSecureHttpOnlyCookie(t *testing
 		ID: "active-user", Email: "owner@example.com", PasswordHash: string(passwordHash), FullName: "Owner", Status: "active", PrincipalScope: "tenant",
 	}}
 	cfg := testAuthConfig()
+	cfg.DeploymentEnv = "production"
 	cfg.AppEnv = "production"
 	handler := NewHandler(NewService(store, cfg))
 	app := fiber.New()

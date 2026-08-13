@@ -49,12 +49,12 @@ func run(ctx context.Context, args []string) error {
 	_ = os.Unsetenv("SAMPLE_TENANT_OWNER_PASSWORD")
 
 	cfg := config.Load()
-	databaseURL := strings.TrimSpace(cfg.MigrationDatabaseURL)
-	if databaseURL == "" {
-		if cfg.AppEnv != "local" {
-			return errors.New("MIGRATION_DATABASE_URL is required outside local development")
-		}
-		databaseURL = cfg.DatabaseURL
+	if err := cfg.ValidateEnvironment(); err != nil {
+		return err
+	}
+	databaseURL, err := sampleDatabaseURL(cfg)
+	if err != nil {
+		return err
 	}
 	db, err := database.Open(ctx, databaseURL)
 	if err != nil {
@@ -77,4 +77,15 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(result)
+}
+
+func sampleDatabaseURL(cfg config.Config) (string, error) {
+	databaseURL := strings.TrimSpace(cfg.MigrationDatabaseURL)
+	if databaseURL != "" {
+		return databaseURL, nil
+	}
+	if cfg.DeploymentEnv != config.EnvironmentLocal {
+		return "", errors.New("MIGRATION_DATABASE_URL is required outside local development")
+	}
+	return cfg.DatabaseURL, nil
 }

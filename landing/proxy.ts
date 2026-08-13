@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { configuredHost, marketingBaseUrl, salonPublicBaseUrl } from "@/lib/config";
+import { configuredHost, marketingBaseUrl, publicApiBaseUrl, salonPublicBaseUrl } from "@/lib/config";
 import { hostRoutingDecision, resolveIncomingHostname } from "@/lib/host-routing";
 import { buildContentSecurityPolicy } from "@/lib/security/content-security-policy";
 
@@ -8,7 +8,7 @@ export function proxy(request: NextRequest) {
   const nonce = crypto.randomUUID().replaceAll("-", "");
   const policy = buildContentSecurityPolicy({
     nonce,
-    apiBaseURL: process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:18089",
+    apiBaseURL: publicApiBaseUrl,
     development: process.env.NODE_ENV !== "production"
   });
   const requestHeaders = new Headers(request.headers);

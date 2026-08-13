@@ -751,6 +751,67 @@ GitHub recovery secrets and the operator-held plaintext files. Rerunning one
 GitHub run reuses its stable action key and exact password fingerprint; a new
 dispatch creates a new action key.
 
+## Runtime Environment Contract
+
+Runtime configuration separates the physical deployment target from the
+application behavior being exercised:
+
+- `DEPLOYMENT_ENV` is fixed by orchestration. `docker-compose.yml` sets
+  `local`; `docker-compose.prod.yml` sets `production`. It is not an operator
+  override in either env file.
+- `APP_ENV` is the behavior profile. Empty or `auto` inherits
+  `DEPLOYMENT_ENV`. Local may explicitly select `production`; production must
+  remain `production` and fails startup on a downgrade or unknown value.
+- Mandatory production RLS, Redis rate limiting, and Secure refresh cookies
+  follow `DEPLOYMENT_ENV`, not a local simulation flag. Local may opt into the
+  independent RLS/rate-limit controls when testing those dependencies.
+
+Normal local startup is:
+
+```bash
+make restart
+```
+
+To run production application branches against local-only PostgreSQL, Redis,
+URLs, cookies, and Compose volumes:
+
+```bash
+make restart-prod-sim
+```
+
+The local restart preflight rejects database, Redis, frontend, or browser API
+targets outside the local Compose/localhost boundary before build. The landing
+server API origin is orchestration-owned rather than a required root `.env`
+input: local Compose renders `LANDING_API_BASE_URL`, the restart validates its
+exact HTTP origin against the rendered Compose service inventory before any
+service starts, and the running landing container must reach that origin's
+`/healthz` endpoint. The validator derives the hostname and port from the
+rendered value; it does not duplicate the Compose endpoint. This simulation is
+not production deployment or production operational-readiness evidence.
+
+`NEXT_PUBLIC_API_BASE_URL` remains the browser-visible origin, such as a
+localhost port or the production Platform domain. `LANDING_API_BASE_URL` is the
+server-only origin used by Next.js rendering inside the landing container. A
+developer running `landing` directly outside Docker may set both through the
+landing-specific env file; normal `make restart` requires no manual landing API
+setting. Local Compose passes the required browser origin into both the landing
+image build and runtime; the image contains no browser API fallback. The
+server-only origin is resolved lazily when a request runs, so the reusable image
+build does not depend on a live API endpoint or embed the internal service URL.
+
+Repository PostgreSQL integration tests must use:
+
+```bash
+make test-backend-integration
+```
+
+That command creates a fresh database whose name carries the existing release-
+gate isolation marker, runs migration and integration packages in per-package
+clones, removes the temporary databases on exit, and verifies that the local
+application database's live/sample user and salon counts are unchanged. Do not
+point `TEST_DATABASE_URL`, `MIGRATION_TEST_DATABASE_URL`, or
+`POS_TAXONOMY_TEST_DATABASE_URL` at the application database.
+
 ## Opt-In Sample Test Data
 
 V73 adds only the `live|sample_test` classification contract to `users` and
@@ -787,6 +848,10 @@ stack, runs migration checksum preflight, starts the API, applies the fixture,
 and waits for health. It stores logins in `.local/sample-data.env`. Repeating
 the command preserves compatible PostgreSQL data and is checksum-validated
 through `sample_data_migrations`.
+
+`make restart-prod-sim` runs the same guarded local fixture flow because the
+physical deployment remains `local`; only the application behavior profile is
+`production`.
 
 For the current pre-live production stack, CI/CD performs the same guarded
 fixture invocation after API migrations and before edge activation. A

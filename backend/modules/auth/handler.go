@@ -94,13 +94,13 @@ func (h *Handler) setRefreshCookie(c *fiber.Ctx, refreshToken string) {
 		MaxAge:   int(h.service.cfg.RefreshTokenTTL / time.Second),
 		Expires:  time.Now().UTC().Add(h.service.cfg.RefreshTokenTTL),
 		HTTPOnly: true,
-		Secure:   h.service.cfg.AppEnv == "production",
+		Secure:   h.service.cfg.IsProductionDeployment(),
 		SameSite: fiber.CookieSameSiteStrictMode,
 	})
 }
 
 func (h *Handler) clearRefreshCookie(c *fiber.Ctx) {
-	secure := h != nil && h.service != nil && h.service.cfg.AppEnv == "production"
+	secure := h != nil && h.service != nil && h.service.cfg.IsProductionDeployment()
 	c.Cookie(&fiber.Cookie{
 		Name:     refreshCookieName,
 		Value:    "",

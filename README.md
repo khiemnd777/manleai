@@ -82,6 +82,22 @@ volume is reset once; compatible restarts preserve the database and replay the
 fixture without duplicates. See `docs/deployment.md` for the pre-live and
 production-live boundary.
 
+The local Compose entrypoint fixes the physical target to `local`. To exercise
+production application behavior while retaining only local databases, Redis,
+URLs, cookies, and volumes, run:
+
+```bash
+make restart-prod-sim
+```
+
+Backend PostgreSQL integration tests must use the isolated local test runner;
+it creates and removes dedicated test databases and verifies that application
+user/salon counts did not change:
+
+```bash
+make test-backend-integration
+```
+
 For non-Docker frontend development:
 
 ```bash

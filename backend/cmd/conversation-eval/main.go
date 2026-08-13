@@ -188,6 +188,9 @@ func main() {
 			checkpointPath = outputPath + ".checkpoint.json"
 		}
 		cfg := config.Load()
+		if err := cfg.ValidateEnvironment(); err != nil {
+			fatalf("validate runtime environment: %v", err)
+		}
 		db, err := database.Open(context.Background(), cfg.DatabaseURL)
 		if err != nil {
 			fatalf("open database for strict OpenAI config resolution: %v", err)

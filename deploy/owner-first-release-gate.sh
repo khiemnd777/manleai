@@ -275,11 +275,32 @@ validate_deployment_workflow_contract() {
   [ "$env_promotion_line" -lt "$current_promotion_line" ] || fail "current release promotion must follow project.env promotion"
 }
 
+validate_runtime_environment_contract() {
+  local local_compose="$repo_root/docker-compose.yml"
+  local production_compose="$repo_root/docker-compose.prod.yml"
+  local makefile="$repo_root/Makefile"
+  local landing_browser_origin_count
+  grep -Fq 'DEPLOYMENT_ENV: local' "$local_compose" || fail "local Compose is missing its fixed deployment environment"
+  grep -Fq 'APP_ENV: ${APP_ENV:-local}' "$local_compose" || fail "local Compose is missing the overridable application behavior profile"
+  grep -Fq 'DEPLOYMENT_ENV: production' "$production_compose" || fail "production Compose is missing its fixed deployment environment"
+  grep -Fq 'APP_ENV: production' "$production_compose" || fail "production Compose application behavior is not fixed"
+  landing_browser_origin_count="$(grep -Fc 'NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:?NEXT_PUBLIC_API_BASE_URL is required}' "$local_compose" || true)"
+  [ "$landing_browser_origin_count" -eq 2 ] || fail "local landing build/runtime must both receive the required browser API origin"
+  grep -Fq 'restart-prod-sim:' "$makefile" || fail "local production simulation entrypoint is missing"
+  grep -Fq 'test-backend-integration:' "$makefile" || fail "isolated local integration entrypoint is missing"
+  grep -Fq 'validate_rendered_landing_api_origin' "$script_dir/local-restart.sh" || fail "local restart is missing rendered landing API validation"
+  grep -Fq 'verify_landing_api_health' "$script_dir/local-restart.sh" || fail "local restart is missing landing-to-API health verification"
+}
+
 run_self_test() {
   local clone_database
   validate_manifest_paths
   bash -n "$script_dir/owner-first-release-gate.sh"
+  bash -n "$script_dir/local-environment-contract.sh"
+  bash -n "$script_dir/local-environment-contract-test.sh"
+  bash "$script_dir/local-environment-contract-test.sh"
   bash -n "$script_dir/local-restart.sh"
+  bash -n "$script_dir/local-backend-integration-test.sh"
   bash -n "$script_dir/postgres-migration-preflight.sh"
   bash -n "$script_dir/postgres-sample-target-preflight.sh"
   bash -n "$script_dir/postgres-data-profile-guard.sh"
@@ -296,6 +317,7 @@ run_self_test() {
   bash "$script_dir/encrypt-platform-admin-credential-handoff-test.sh"
   bash -n "$manifest"
   validate_deployment_workflow_contract
+  validate_runtime_environment_contract
   clone_database="$(build_clone_database_name "manleai_phase10_release_gate_database_with_a_long_name" "integration" "19" "12345")"
   [[ "$clone_database" == *release_gate* ]] || fail "clone database self-test lost the release_gate marker"
   [[ "$clone_database" == manleai_load_* ]] || fail "clone database self-test lost the scheduling-load isolation prefix"

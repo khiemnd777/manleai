@@ -54,7 +54,7 @@ cmd/worker           Independently scheduled POS sync, booking lease, quote clea
 cmd/platform-access  Protected operator mutations for replay-safe Tenant login-email replacement, one-time first-Platform-Admin bootstrap, exact-single-active-Admin credential recovery, and exact-salon active-Tenant-owner credential recovery with session revocation and immutable audit
 cmd/sample-data      Guarded sample_test fixture runner; invoked by local/pre-live orchestration after startup migration, never by the migration chain itself
 cmd/scheduling-load-harness Bounded isolated scheduling replay/CAS/atomicity verification; never a production runtime
-internal/config      environment config
+internal/config      validated physical deployment environment plus manually overridable application behavior profile
 internal/database    PostgreSQL context-aware runtime connection, runtime-role/RLS verification, and startup migrations through a separate migration connection
 internal/schedulingload Synthetic Owner-first concurrency workloads, target guards, invariant gate, and schema-versioned report
 internal/encryption  AES-GCM token encryption
@@ -1511,6 +1511,17 @@ normal write to `live`. Sample fixture SQL is embedded under
 `backend/sampledata/migrations`, uses its own `sample_data_migrations` ledger,
 and is unreachable from the startup migrator. Its command is an explicit
 pre-live/local operation that fails when live identities or tenants exist.
+
+Runtime environment ownership has two dimensions. `DEPLOYMENT_ENV` is the
+physical target fixed by the selected Compose entrypoint: local Compose owns
+`local`, while production Compose owns `production`. `APP_ENV` is the behavior
+profile; it inherits the physical target unless explicitly overridden. A local
+deployment may select production behavior for bounded local simulation, but a
+production deployment cannot select local behavior. Deployment-only security
+requirements such as mandatory RLS, rate limiting, and Secure cookies follow
+the physical target, so a local simulation cannot weaken production and stays
+usable on localhost. Local PostgreSQL integration tests use disposable,
+dedicated release-gate databases rather than the application database.
 
 Domain ownership is separate from scheduling execution. ManleAI owns canonical
 salon records and owner workflow state. The captured scheduling authority owns

@@ -3,7 +3,7 @@ import type { Locale } from "./pricing-catalog";
 export const marketingContent = {
   en: {
     nav: {
-      why: "Why Manle",
+      why: "Why Tianna AI",
       features: "Features",
       workflow: "How it works",
       pricing: "Pricing",
@@ -14,7 +14,7 @@ export const marketingContent = {
       eyebrow: "AI receptionist made for nail salons",
       title: "Never miss the",
       titleAccent: "next booking.",
-      lead: "ManleAI helps nail salons handle English calls, answer from salon-approved information, capture appointment requests, and hand exceptions back to the team.",
+      lead: "Tianna AI helps nail salons handle English calls, answer from salon-approved information, capture appointment requests, and hand exceptions back to the team.",
       primary: "Get a free demo",
       secondary: "Hear how it works",
       trust: ["English call handling", "Nail-salon workflows", "Human handoff"],
@@ -33,7 +33,7 @@ export const marketingContent = {
       kicker: "The front-desk problem",
       title: "Your hands are busy.",
       titleAccent: "The phone is still ringing.",
-      lead: "A missed call can become a missed opportunity. ManleAI protects the team’s focus without leaving callers without a clear next step.",
+      lead: "A missed call can become a missed opportunity. Tianna AI protects the team’s focus without leaving callers without a clear next step.",
       items: [
         { tag: "Missed opportunity", title: "Calls go unanswered", body: "Customers often call the next salon instead of leaving a voicemail." },
         { tag: "Broken focus", title: "Services get interrupted", body: "Technicians stop mid-service to answer pricing, availability, and direction questions." },
@@ -44,13 +44,13 @@ export const marketingContent = {
       kicker: "Built for nail salons",
       title: "Not a generic chatbot.",
       titleAccent: "A real front-desk teammate.",
-      lead: "Configure ManleAI around salon services, prices, business hours, policies, staff preferences, and the explicitly selected scheduling workflow.",
+      lead: "Configure Tianna AI around salon services, prices, business hours, policies, staff preferences, and the explicitly selected scheduling workflow.",
       items: [
-        { title: "Natural English conversations", body: "Callers can speak naturally in English while ManleAI follows the salon’s approved information and call flow." },
+        { title: "Natural English conversations", body: "Callers can speak naturally in English while Tianna AI follows the salon’s approved information and call flow." },
         { title: "Salon-approved answers", body: "Services, prices, hours, and policies come from the salon’s managed information." },
         { title: "Request-safe scheduling", body: "Owner Manual records a pending owner-review request and never confirms automatically." },
         { title: "Smart human handoff", body: "Complex or sensitive requests can return to the salon team with useful context." },
-        { title: "Evidence before confirmation", body: "A ready ManleAI Calendar or supported external workflow confirms only after durable booking evidence exists." }
+        { title: "Evidence before confirmation", body: "A ready Tianna AI Calendar or supported external workflow confirms only after durable booking evidence exists." }
       ],
       notices: [
         { title: "Request received", body: "Pending salon review" },
@@ -61,7 +61,7 @@ export const marketingContent = {
       kicker: "From hello to the next step",
       title: "One smooth call.",
       titleAccent: "Four clear steps.",
-      lead: "ManleAI follows the salon’s configured phone and scheduling rules, then uses wording that matches the evidence actually returned.",
+      lead: "Tianna AI follows the salon’s configured phone and scheduling rules, then uses wording that matches the evidence actually returned.",
       cta: "See it for my salon",
       steps: [
         { title: "Answer promptly", body: "Greet callers through the salon’s configured phone runtime." },
@@ -79,11 +79,11 @@ export const marketingContent = {
       titleAccent: "Careful enough for salon operations.",
       lead: "The default example below uses Owner Manual: the request is recorded for salon review and is not presented as a confirmed appointment.",
       lines: [
-        { role: "ai", label: "ManleAI", text: "Thanks for calling Bella Nails Studio. How can I help you today?" },
+        { role: "ai", label: "Tianna AI", text: "Thanks for calling Bella Nails Studio. How can I help you today?" },
         { role: "customer", label: "Customer", text: "Can I request a gel manicure this Friday afternoon?" },
-        { role: "ai", label: "ManleAI", text: "Absolutely. I’ll record the service, preferred time, and your contact details." },
+        { role: "ai", label: "Tianna AI", text: "Absolutely. I’ll record the service, preferred time, and your contact details." },
         { role: "customer", label: "Customer", text: "Friday after 2:00 works." },
-        { role: "ai", label: "ManleAI", text: "Your request is received and pending salon review. The salon will confirm the final time." }
+        { role: "ai", label: "Tianna AI", text: "Your request is received and pending salon review. The salon will confirm the final time." }
       ],
       benefits: [
         { title: "Your voice, your rules", body: "Configure greeting, tone, services, and policies." },
@@ -107,7 +107,7 @@ export const marketingContent = {
       kicker: "Fits your operation",
       title: "Connect the tools",
       titleAccent: "your salon actually uses.",
-      body: "ManleAI uses an integration layer for supported calendars, booking systems, POS platforms, messaging, and internal workflows. Square Appointments is the currently implemented external provider; a connection never selects scheduling authority by itself.",
+      body: "Tianna AI uses an integration layer for supported calendars, booking systems, POS platforms, messaging, and internal workflows. Square Appointments is the currently implemented external provider; a connection never selects scheduling authority by itself.",
       cta: "Discuss my setup",
       categories: { calendar: "Calendar", messaging: "Messaging", team: "Team" }
     },
@@ -118,15 +118,15 @@ export const marketingContent = {
       lead: "Every salon operates differently. Setup is reviewed against actual services, rules, runtime configuration, and the selected scheduling workflow.",
       items: [
         { question: "Which call language is available at launch?", answer: "English. The marketing site and onboarding contact remain available in English and Vietnamese for salon owners." },
-        { question: "Does ManleAI automatically confirm every appointment?", answer: "No. Owner Manual creates a pending owner-review request. ManleAI Calendar or Square confirms only after its configured workflow succeeds with durable evidence." },
+        { question: "Does Tianna AI automatically confirm every appointment?", answer: "No. Owner Manual creates a pending owner-review request. Tianna AI Calendar or Square confirms only after its configured workflow succeeds with durable evidence." },
         { question: "What happens when a customer needs a person?", answer: "The call can be transferred or escalated according to the salon’s configured rules, with context available where the runtime provides that evidence." },
         { question: "Does connecting Square turn on booking?", answer: "No. Provider connection does not select scheduling authority or prove booking readiness." },
-        { question: "Can ManleAI work with every POS?", answer: "No broad compatibility is promised. Square Appointments is the implemented external provider; other integrations require separate evaluation." }
+        { question: "Can Tianna AI work with every POS?", answer: "No broad compatibility is promised. Square Appointments is the implemented external provider; other integrations require separate evaluation." }
       ]
     },
     final: {
       kicker: "Your next caller could be your next regular",
-      title: "Let ManleAI",
+      title: "Let Tianna AI",
       titleAccent: "pick up the phone.",
       body: "Tell us about your salon. Platform Operations reviews the request before any Tenant is provisioned.",
       cta: "Book my free demo"
@@ -140,7 +140,7 @@ export const marketingContent = {
   },
   vi: {
     nav: {
-      why: "Vì sao Manle",
+      why: "Vì sao Tianna AI",
       features: "Tính năng",
       workflow: "Cách hoạt động",
       pricing: "Bảng giá",
@@ -151,7 +151,7 @@ export const marketingContent = {
       eyebrow: "AI lễ tân được thiết kế riêng cho tiệm nail",
       title: "Không bỏ lỡ",
       titleAccent: "cơ hội đặt lịch tiếp theo.",
-      lead: "ManleAI giúp tiệm nail xử lý cuộc gọi tiếng Anh, trả lời từ thông tin được tiệm duyệt, ghi nhận yêu cầu lịch hẹn và chuyển ngoại lệ về cho đội ngũ.",
+      lead: "Tianna AI giúp tiệm nail xử lý cuộc gọi tiếng Anh, trả lời từ thông tin được tiệm duyệt, ghi nhận yêu cầu lịch hẹn và chuyển ngoại lệ về cho đội ngũ.",
       primary: "Nhận demo miễn phí",
       secondary: "Xem cách hoạt động",
       trust: ["Cuộc gọi tiếng Anh", "Quy trình riêng cho nail", "Chuyển tiếp nhân viên"],
@@ -170,7 +170,7 @@ export const marketingContent = {
       kicker: "Bài toán tại quầy lễ tân",
       title: "Tay bạn đang bận.",
       titleAccent: "Điện thoại vẫn đang reo.",
-      lead: "Một cuộc gọi bị lỡ có thể là một cơ hội bị mất. ManleAI giúp đội ngũ tập trung mà người gọi vẫn có bước tiếp theo rõ ràng.",
+      lead: "Một cuộc gọi bị lỡ có thể là một cơ hội bị mất. Tianna AI giúp đội ngũ tập trung mà người gọi vẫn có bước tiếp theo rõ ràng.",
       items: [
         { tag: "Mất cơ hội", title: "Cuộc gọi không được nghe", body: "Khách thường gọi sang tiệm khác thay vì để lại lời nhắn thoại." },
         { tag: "Gián đoạn công việc", title: "Dịch vụ bị ngắt quãng", body: "Thợ phải dừng giữa chừng để trả lời về giá, lịch trống hoặc đường đi." },
@@ -181,13 +181,13 @@ export const marketingContent = {
       kicker: "Sinh ra cho tiệm nail",
       title: "Không phải chatbot đại trà.",
       titleAccent: "Mà là một đồng đội lễ tân.",
-      lead: "Cấu hình ManleAI theo dịch vụ, bảng giá, giờ làm, chính sách, sở thích nhân viên và scheduling workflow được tiệm chọn rõ ràng.",
+      lead: "Cấu hình Tianna AI theo dịch vụ, bảng giá, giờ làm, chính sách, sở thích nhân viên và scheduling workflow được tiệm chọn rõ ràng.",
       items: [
-        { title: "Hội thoại tiếng Anh tự nhiên", body: "Khách có thể giao tiếp tự nhiên bằng tiếng Anh trong khi ManleAI tuân thủ thông tin và call flow đã được tiệm duyệt." },
+        { title: "Hội thoại tiếng Anh tự nhiên", body: "Khách có thể giao tiếp tự nhiên bằng tiếng Anh trong khi Tianna AI tuân thủ thông tin và call flow đã được tiệm duyệt." },
         { title: "Câu trả lời được tiệm duyệt", body: "Dịch vụ, giá, giờ làm và chính sách đến từ thông tin do tiệm quản lý." },
         { title: "Scheduling theo dạng yêu cầu", body: "Owner Manual ghi nhận yêu cầu chờ chủ tiệm review và không tự xác nhận." },
         { title: "Chuyển tiếp thông minh", body: "Yêu cầu phức tạp hoặc nhạy cảm có thể được chuyển về đội ngũ kèm ngữ cảnh hữu ích." },
-        { title: "Có evidence trước khi xác nhận", body: "ManleAI Calendar hoặc external workflow được hỗ trợ chỉ xác nhận sau khi có booking evidence bền vững." }
+        { title: "Có evidence trước khi xác nhận", body: "Tianna AI Calendar hoặc external workflow được hỗ trợ chỉ xác nhận sau khi có booking evidence bền vững." }
       ],
       notices: [
         { title: "Đã nhận yêu cầu", body: "Đang chờ salon review" },
@@ -198,7 +198,7 @@ export const marketingContent = {
       kicker: "Từ lời chào đến bước tiếp theo",
       title: "Một cuộc gọi mượt mà.",
       titleAccent: "Bốn bước rõ ràng.",
-      lead: "ManleAI tuân thủ phone và scheduling rules đã cấu hình, sau đó dùng cách diễn đạt đúng với evidence thực tế được trả về.",
+      lead: "Tianna AI tuân thủ phone và scheduling rules đã cấu hình, sau đó dùng cách diễn đạt đúng với evidence thực tế được trả về.",
       cta: "Xem demo cho tiệm tôi",
       steps: [
         { title: "Nghe máy kịp thời", body: "Chào khách qua phone runtime đã cấu hình của salon." },
@@ -216,11 +216,11 @@ export const marketingContent = {
       titleAccent: "Cẩn trọng với quy trình salon.",
       lead: "Ví dụ mặc định dưới đây dùng Owner Manual: yêu cầu được ghi nhận để salon review và không được trình bày như lịch đã xác nhận.",
       lines: [
-        { role: "ai", label: "ManleAI", text: "Thanks for calling Bella Nails Studio. How can I help you today?" },
+        { role: "ai", label: "Tianna AI", text: "Thanks for calling Bella Nails Studio. How can I help you today?" },
         { role: "customer", label: "Customer", text: "Can I request a gel manicure this Friday afternoon?" },
-        { role: "ai", label: "ManleAI", text: "Absolutely. I’ll record the service, preferred time, and your contact details." },
+        { role: "ai", label: "Tianna AI", text: "Absolutely. I’ll record the service, preferred time, and your contact details." },
         { role: "customer", label: "Customer", text: "Friday after 2:00 works." },
-        { role: "ai", label: "ManleAI", text: "Your request is received and pending salon review. The salon will confirm the final time." }
+        { role: "ai", label: "Tianna AI", text: "Your request is received and pending salon review. The salon will confirm the final time." }
       ],
       benefits: [
         { title: "Giọng điệu và quy tắc của bạn", body: "Cấu hình lời chào, phong cách, dịch vụ và chính sách." },
@@ -244,7 +244,7 @@ export const marketingContent = {
       kicker: "Phù hợp với vận hành",
       title: "Kết nối những công cụ",
       titleAccent: "tiệm thực sự sử dụng.",
-      body: "ManleAI dùng integration layer cho lịch, hệ thống booking, POS, tin nhắn và quy trình nội bộ được hỗ trợ. Square Appointments là external provider hiện đã triển khai; kết nối không tự lựa chọn scheduling authority.",
+      body: "Tianna AI dùng integration layer cho lịch, hệ thống booking, POS, tin nhắn và quy trình nội bộ được hỗ trợ. Square Appointments là external provider hiện đã triển khai; kết nối không tự lựa chọn scheduling authority.",
       cta: "Trao đổi về hệ thống của tôi",
       categories: { calendar: "Lịch", messaging: "Tin nhắn", team: "Nhân viên" }
     },
@@ -255,15 +255,15 @@ export const marketingContent = {
       lead: "Mỗi tiệm có cách vận hành khác nhau. Việc thiết lập được review theo dịch vụ, quy tắc, runtime configuration và scheduling workflow đã chọn.",
       items: [
         { question: "Ngôn ngữ cuộc gọi nào được hỗ trợ khi ra mắt?", answer: "Tiếng Anh. Website marketing và liên hệ onboarding vẫn có tiếng Anh và tiếng Việt cho chủ salon." },
-        { question: "ManleAI có tự xác nhận mọi lịch hẹn không?", answer: "Không. Owner Manual tạo yêu cầu chờ chủ tiệm review. ManleAI Calendar hoặc Square chỉ xác nhận sau khi workflow thành công và có evidence bền vững." },
+        { question: "Tianna AI có tự xác nhận mọi lịch hẹn không?", answer: "Không. Owner Manual tạo yêu cầu chờ chủ tiệm review. Tianna AI Calendar hoặc Square chỉ xác nhận sau khi workflow thành công và có evidence bền vững." },
         { question: "Điều gì xảy ra khi khách cần gặp người thật?", answer: "Cuộc gọi có thể được chuyển hoặc escalation theo rules đã cấu hình; ngữ cảnh đi kèm được cung cấp khi runtime có evidence đó." },
         { question: "Kết nối Square có tự bật booking không?", answer: "Không. Kết nối Square không tự bật booking. Salon chỉ dùng Square Appointments sau khi hoàn tất kết nối và thiết lập booking được review." },
-        { question: "ManleAI có dùng được với mọi POS không?", answer: "Không có cam kết tương thích rộng. Square Appointments là external provider hiện đã triển khai; integration khác cần đánh giá riêng." }
+        { question: "Tianna AI có dùng được với mọi POS không?", answer: "Không có cam kết tương thích rộng. Square Appointments là external provider hiện đã triển khai; integration khác cần đánh giá riêng." }
       ]
     },
     final: {
       kicker: "Người gọi tiếp theo có thể trở thành khách quen",
-      title: "Để ManleAI",
+      title: "Để Tianna AI",
       titleAccent: "nghe điện thoại.",
       body: "Cho chúng tôi biết về salon. Platform Operations sẽ review yêu cầu trước khi bất kỳ Tenant nào được provision.",
       cta: "Đặt demo miễn phí"

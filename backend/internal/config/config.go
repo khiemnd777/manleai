@@ -1,13 +1,27 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 )
 
+const (
+	EnvironmentLocal      = "local"
+	EnvironmentProduction = "production"
+)
+
+var (
+	ErrDeploymentEnvironmentInvalid  = errors.New("deployment environment must be local or production")
+	ErrApplicationEnvironmentInvalid = errors.New("application environment must be local or production")
+	ErrProductionEnvironmentMismatch = errors.New("production deployment requires production application behavior")
+)
+
 type Config struct {
+	DeploymentEnv           string
 	AppEnv                  string
 	ServerPort              string
 	DatabaseURL             string
@@ -131,16 +145,21 @@ func NormalizeOpenAIRealtimeNoiseProfile(profile string) string {
 }
 
 func Load() Config {
-	appEnv := env("APP_ENV", "local")
+	deploymentEnv := normalizeEnvironment(env("DEPLOYMENT_ENV", EnvironmentLocal))
+	appEnv := normalizeEnvironment(strings.TrimSpace(os.Getenv("APP_ENV")))
+	if appEnv == "" || appEnv == "auto" {
+		appEnv = deploymentEnv
+	}
 	return Config{
+		DeploymentEnv:           deploymentEnv,
 		AppEnv:                  appEnv,
 		ServerPort:              env("SERVER_PORT", "8080"),
 		DatabaseURL:             env("DATABASE_URL", "postgres://ai_receptionist:ai_receptionist@localhost:55432/ai_receptionist?sslmode=disable"),
 		MigrationDatabaseURL:    env("MIGRATION_DATABASE_URL", ""),
 		DatabaseRuntimeRole:     env("DATABASE_RUNTIME_ROLE", ""),
-		DatabaseRLSEnforced:     appEnv == "production" || envBool("DATABASE_RLS_ENFORCED", false),
+		DatabaseRLSEnforced:     deploymentEnv == EnvironmentProduction || envBool("DATABASE_RLS_ENFORCED", false),
 		RedisURL:                env("REDIS_URL", "redis://localhost:56379/0"),
-		RateLimitEnabled:        appEnv == "production" || envBool("RATE_LIMIT_ENABLED", false),
+		RateLimitEnabled:        deploymentEnv == EnvironmentProduction || envBool("RATE_LIMIT_ENABLED", false),
 		RateLimitClientIPHeader: env("RATE_LIMIT_CLIENT_IP_HEADER", "X-ManleAI-Client-IP"),
 		JWTSecret:               env("JWT_SECRET", "local-development-secret-change-me"),
 		AccessTokenTTL:          time.Duration(envInt("ACCESS_TOKEN_TTL_MINUTES", 30)) * time.Minute,
@@ -178,6 +197,35 @@ func Load() Config {
 			},
 		},
 	}
+}
+
+func (cfg Config) ValidateEnvironment() error {
+	if !validEnvironment(cfg.DeploymentEnv) {
+		return fmt.Errorf("%w: %q", ErrDeploymentEnvironmentInvalid, cfg.DeploymentEnv)
+	}
+	if !validEnvironment(cfg.AppEnv) {
+		return fmt.Errorf("%w: %q", ErrApplicationEnvironmentInvalid, cfg.AppEnv)
+	}
+	if cfg.DeploymentEnv == EnvironmentProduction && cfg.AppEnv != EnvironmentProduction {
+		return ErrProductionEnvironmentMismatch
+	}
+	return nil
+}
+
+func (cfg Config) IsProductionDeployment() bool {
+	return cfg.DeploymentEnv == EnvironmentProduction
+}
+
+func (cfg Config) IsProductionBehavior() bool {
+	return cfg.AppEnv == EnvironmentProduction
+}
+
+func normalizeEnvironment(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func validEnvironment(value string) bool {
+	return value == EnvironmentLocal || value == EnvironmentProduction
 }
 
 func env(key, fallback string) string {
